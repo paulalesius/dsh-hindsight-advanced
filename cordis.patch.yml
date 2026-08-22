@@ -1,0 +1,64 @@
+# dsh-plugin-hindsight bundle patch: the profile layer that mounts this
+# package. `dsh plugin add` joins it into `dsh.profile.bundles` (the CLI
+# reconciles the layer list against installed state).
+#
+# The row ships DISABLED — the install is inert. Two opt-in scopes (README):
+# - per preset: a row in the preset's own agent.cordis.yml
+#   (`name: dsh-plugin-hindsight`, its own `config` — that preset's bank).
+#   Presets without the row are mount-less: no tool, no auto-recall.
+# - for every preset: the user's profile patch layer
+#   (~/.dsh/profiles/web/cordis.patch.yml) enables this row:
+#     - id: hindsight
+#       disabled: false
+#   An id-targeted `config` in that layer replaces the row's config block
+#   whole (no deep merge).
+#
+# Never combine both: the host row and a preset row are two mounts, and the
+# per-step auto-recall listeners then collide (see the README).
+- insert:
+    - id: hindsight
+      name: dsh-plugin-hindsight
+      disabled: true
+      config:
+        # REQUIRED — the only key with no default. Bank id (case-sensitive; the
+        # server auto-creates it on first use). The bank is the OUTER isolation
+        # boundary; inside it, memories live in three visibility tiers (see
+        # retainScope below) that recall always sees together.
+        bank: dsh
+
+        # Hindsight REST base. Default: http://127.0.0.1:8888
+        baseUrl: http://127.0.0.1:9177
+
+        # Optional; sent as Authorization: Bearer <key> on every call.
+        apiKey: local-key
+
+        # true — automatic recall on the first step of each turn. false — the
+        # hindsight tool stays, the automatic recall goes.
+        autoContext: true
+
+        # true — the model sees only the LATEST automatic snapshot (each new one
+        # shadows the previous on the session surface, preserve-thinking pattern):
+        # memory adds one message to the context, not one per turn. false — every
+        # turn's snapshot accumulates.
+        latestOnly: true
+
+        # false — retain waits for the bank to process the memory, so the very
+        # next recall already sees it. true — fast ack, background extraction.
+        retainAsync: false
+
+        # 1024 — token budget for recall responses.
+        maxRecallTokens: 1024
+
+        # 2500 — bound for the automatic lookup; a stopped/slow server never
+        # blocks a turn.
+        autoContextTimeoutMs: 2500
+
+        # The visibility tier `retain` uses when the model omits the `scope`
+        # parameter: 'global' (visible to every session of the bank),
+        # 'preset' (this agent preset's sessions), or 'session' (this session
+        # only). recall and reflect always see the session's own tier, its
+        # preset's tier, and the global tier — never another session's or
+        # preset's tier.
+        retainScope: preset
+        bankConfig:
+          retain_mission: "Focus on the user's DSH workflow: durable decisions, project facts, and preferences worth recalling later. Ignore transient status and raw code."

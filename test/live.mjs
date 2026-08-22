@@ -1,0 +1,158 @@
+// Live round-trip against the real Hindsight server, driven through the
+// workspace package (the deployable file), with the production config shape:
+// a single mount routing to a scratch bank. Also verifies the visibility
+// tiers against the REAL server: retain tier tags (preset default, session
+// tier), a server-side tag read-back via /memories/list, and the recall
+// tier filter (own + preset tiers visible, a sibling session's tier not).
+//
+// Uses a scratch bank (auto-created by the server) and deletes it at the end,
+// so the user's real `hermes` bank is never touched.
+//
+//   node --import ./register.mjs live.mjs
+import assert from 'node:assert/strict'
+
+const BASE = 'http://127.0.0.1:9177'
+const API_KEY = 'local-key'
+const BANK = 'dsh-plugin-smoke'
+const PLUGIN = 'file:///home/noname/deepseek-harness/dsh-plugins/hindsight/hindsight.ts'
+
+const plugin = await import(PLUGIN)
+assert.equal(plugin.name, 'hindsight')
+
+// ── same minimal context shape as test.mjs ──────────────────────────────────
+function makeCtx() {
+  return {
+    tools: { registered: [], register(tool) { this.registered.push(tool) } },
+    listeners: [],
+    on(event, fn, options) { this.listeners.push({ event, fn, options }) },
+  }
+}
+const signal = new AbortController().signal
+
+// Fake sessions in the shape test.mjs uses: the plugin reads session.id and
+// session.header.agentPreset to derive the tier tags. Two sessions of one
+// preset, so the preset tier is shared between them while the session tier
+// is per-session.
+const alice = { session: { id: 'live-sess-a', header: { agentPreset: 'smoke-preset' } } }
+const bob = { session: { id: 'live-sess-b', header: { agentPreset: 'smoke-preset' } } }
+
+// bankConfig rides the first memory operation as a PATCH .../config and is
+// durable server state: assert the mission actually landed via GET.
+const MISSION = 'Focus on the live-demo project: build steps and deployment target.'
+const ctx = makeCtx()
+plugin.apply(ctx, {
+  bank: BANK,
+  baseUrl: BASE,
+  apiKey: API_KEY,
+  autoContext: true,
+  maxRecallTokens: 1024,
+  autoContextTimeoutMs: 2500,
+  bankConfig: { retain_mission: MISSION },
+})
+assert.equal(ctx.tools.registered.length, 1, 'one tool registered')
+const tool = ctx.tools.registered[0]
+assert.equal(tool.name, 'hindsight')
+
+const run = (args, exec = { signal }) => tool.execute(args, exec)
+
+// ── start clean: scratch bank may exist from a previous run; delete it ──────
+{
+  const res = await fetch(`${BASE}/v1/default/banks/${BANK}`, { method: 'DELETE', headers: { authorization: `Bearer ${API_KEY}` } })
+  assert.ok(res.ok || res.status === 404, `cleanup delete: HTTP ${res.status}`)
+}
+console.log(`ok  scratch bank ${BANK} reset`)
+
+// ── server-side tag read-back: /memories/list is a direct DB query, so it
+//    does not wait on embedding/indexing latency ────────────────────────────
+const listUnits = async params => {
+  const url = new URL(`${BASE}/v1/default/banks/${BANK}/memories/list`)
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
+  const res = await fetch(url, { headers: { authorization: `Bearer ${API_KEY}` } })
+  assert.ok(res.ok, `memory list: HTTP ${res.status}`)
+  const data = await res.json()
+  return data.items ?? []
+}
+
+// ── retain (synchronous): the default scope is the session's preset tier ────
+{
+  const out = await run({ action: 'retain', text: 'The live-demo project is built with pnpm and deploys to the box at 192.168.8.20.' }, { agent: alice, signal })
+  assert.equal(out.action, 'retain')
+  assert.equal(out.bank, BANK)
+  const units = (await listUnits({ tags: 'preset:smoke-preset', tags_match: 'all_strict' }))
+    .filter(unit => /live-demo|pnpm|192\.168\.8\.20/.test(String(unit.text ?? '')))
+  assert.ok(units.length > 0, `no unit tagged preset:smoke-preset carrying the retain content: ${JSON.stringify(await listUnits({}))}`)
+  console.log('ok  retain (default scope) → unit stored tagged preset:smoke-preset (verified server-side)')
+}
+
+// ── retain scope: 'session' ─────────────────────────────────────────────────
+{
+  await run({ action: 'retain', text: 'The smoke session keeps its scratch notes in a Notion page.', scope: 'session' }, { agent: alice, signal })
+  const units = (await listUnits({ tags: 'session:live-sess-a', tags_match: 'all_strict' }))
+    .filter(unit => /Notion/.test(String(unit.text ?? '')))
+  assert.ok(units.length > 0, `no unit tagged session:live-sess-a carrying the retain content: ${JSON.stringify(await listUnits({}))}`)
+  console.log('ok  retain scope: session → unit stored tagged session:live-sess-a (verified server-side)')
+}
+
+// ── bank config: the first op should have PATCHed the declared mission ──────
+{
+  const res = await fetch(`${BASE}/v1/default/banks/${BANK}/config`, { headers: { authorization: `Bearer ${API_KEY}` } })
+  assert.ok(res.ok, `config read-back: HTTP ${res.status}`)
+  const config = await res.json()
+  const overrides = config.overrides ?? config
+  assert.equal(overrides.retain_mission, MISSION, JSON.stringify(config))
+  console.log('ok  bankConfig → retain_mission applied via the lazy config PATCH')
+}
+
+// ── recall: poll until the bank's extraction lands (bounded) ────────────────
+let hits = ''
+const deadline = Date.now() + 90_000
+while (Date.now() < deadline) {
+  const out = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: alice, signal })
+  assert.equal(out.action, 'recall')
+  hits = out.text === 'no memories matched' ? '' : String(out.text)
+  if (hits.length > 0) break
+  await new Promise(r => setTimeout(r, 3_000))
+}
+assert.ok(hits.length > 0, `recall never matched: ${JSON.stringify(hits)}`)
+assert.match(String(hits), /live-demo|pnpm|192\.168\.8\.20/)
+console.log('ok  recall (tier-filtered) → matched the preset-tier memory')
+
+// ── tier visibility: own + preset tiers visible, a sibling's tier is not ────
+{
+  // alice (the owner) sees her own session tier, once indexed
+  let sessionHits = ''
+  const deadline2 = Date.now() + 90_000
+  while (Date.now() < deadline2) {
+    const out = await run({ action: 'recall', query: 'where does the smoke session keep its scratch notes' }, { agent: alice, signal })
+    sessionHits = out.text === 'no memories matched' ? '' : String(out.text)
+    if (/Notion/.test(sessionHits)) break
+    await new Promise(r => setTimeout(r, 3_000))
+  }
+  assert.ok(/Notion/.test(sessionHits), `the owner's own session-tier memory never matched: ${JSON.stringify(sessionHits)}`)
+
+  // bob (same preset, another session): the preset tier is shared, the
+  // session tier is not — the server-side tag filter makes this exact
+  const bobPreset = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: bob, signal })
+  assert.match(String(bobPreset.text), /live-demo|pnpm|192\.168\.8\.20/, 'the shared preset tier is visible to the sibling session')
+  const bobSession = await run({ action: 'recall', query: 'where does the smoke session keep its scratch notes' }, { agent: bob, signal })
+  assert.doesNotMatch(String(bobSession.text), /Notion/, 'a sibling session\'s session-tier memory must stay invisible')
+  console.log('ok  tier visibility → own + preset tiers visible, a sibling session\'s tier is not')
+}
+
+// ── reflect: synthesized answer grounded in the bank ────────────────────────
+{
+  const out = await run({ action: 'reflect', query: 'What do we know about the live-demo project?' }, { agent: alice, signal })
+  assert.equal(out.action, 'reflect')
+  assert.equal(typeof out.text, 'string')
+  assert.ok(out.text.length > 0)
+  console.log(`ok  reflect → "${String(out.text).slice(0, 140)}${out.text.length > 140 ? '…' : ''}"`)
+}
+
+// ── cleanup ─────────────────────────────────────────────────────────────────
+{
+  const res = await fetch(`${BASE}/v1/default/banks/${BANK}`, { method: 'DELETE', headers: { authorization: `Bearer ${API_KEY}` } })
+  assert.ok(res.ok, `final delete: HTTP ${res.status}`)
+  console.log(`ok  scratch bank ${BANK} deleted`)
+}
+
+console.log('\nall live hindsight round-trip checks passed')
