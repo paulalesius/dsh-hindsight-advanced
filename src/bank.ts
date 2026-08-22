@@ -16,7 +16,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { request } from './client.ts'
 import type { ResolvedConfig } from './config.ts'
 import { recallTags, scopeTags, type MemoryScope } from './tiers.ts'
-import type { RecallHit, RecallOptions } from './types.ts'
+import type { DirectiveRule, RecallHit, RecallOptions } from './types.ts'
 
 /** One mounted bank and the operations against it. */
 export interface Mount {
@@ -38,6 +38,19 @@ export interface Mount {
   /** A synthesized answer grounded in the bank's facts, with the same tier
    *  scoping as recall. */
   reflect(query: string, signal: AbortSignal, session: Session | undefined): Promise<string>
+  /** The bank's active standing directives (rules) for `session`'s visible
+   *  tiers (`undefined` session: every active directive), priority-ordered
+   *  (highest first). */
+  listDirectives(signal: AbortSignal, session: Session | undefined): Promise<DirectiveRule[]>
+  /** Store a standing directive named `name`, tagged with `session`'s tier
+   *  for `scope` (`undefined` session: the global tier). */
+  retainDirective(
+    name: string,
+    content: string,
+    signal: AbortSignal,
+    session: Session | undefined,
+    scope: MemoryScope,
+  ): Promise<void>
 }
 
 /** Build the operations for one mount, owning its per-mount state. */
@@ -125,6 +138,40 @@ export function createMount(config: ResolvedConfig): Mount {
       withTierFilter(body, session)
       const data = await request(config, `${bankPath}/reflect`, body, signal)
       return typeof data.text === 'string' && data.text.length > 0 ? data.text : 'the bank returned an empty answer'
+    },
+
+    async listDirectives(signal, session): Promise<DirectiveRule[]> {
+      await syncBankConfig(signal)
+      let path = `${bankPath}/directives?active_only=true`
+      // The same tier filter as recall: the server includes every untagged
+      // (global) directive in every mode, so the two tier tags select exactly
+      // the session's own tier, its preset tier, and the global ones.
+      if (session !== undefined) {
+        const tags = recallTags(session).map(encodeURIComponent).join(',')
+        path += `&tags=${tags}&tags_match=any`
+      }
+      const data = await request(config, path, {}, signal, 'GET')
+      const items = data.items
+      if (!Array.isArray(items)) return []
+      return items
+        .filter((rule): rule is DirectiveRule =>
+          typeof rule === 'object' && rule !== null
+          && typeof (rule as DirectiveRule).id === 'string'
+          && typeof (rule as DirectiveRule).name === 'string'
+          && typeof (rule as DirectiveRule).content === 'string'
+          && typeof (rule as DirectiveRule).priority === 'number',
+        )
+        .sort((a, b) => b.priority - a.priority)
+    },
+
+    async retainDirective(name, content, signal, session, scope): Promise<void> {
+      await syncBankConfig(signal)
+      // Like retain: the directive's tag set IS its scope — at most one
+      // tier's tag; no session means the global tier.
+      const tags = session === undefined ? [] : scopeTags(session, scope)
+      const body: Record<string, unknown> = { name, content, is_active: true }
+      if (tags.length > 0) body.tags = tags
+      await request(config, `${bankPath}/directives`, body, signal)
     },
   }
 }

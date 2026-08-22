@@ -18,6 +18,14 @@ tier, its preset's tier, and the global tier — never another session's or
 preset's tier. Separate banks (separate mounts) remain the outer isolation
 boundary for separate memory surfaces.
 
+A bank can also hold **standing directives** — behavioral rules ("always X",
+"never do Y") stored with `retain` + `kind: 'directive'` (+ a short `name`).
+Directives are *applied, not recalled*: they carry the same tier tags as
+memories, are listed (tier-scoped) on the first step of each turn, and are
+rendered in their own "Standing rules" section of the per-turn snapshot — so
+a stored rule reaches the model every turn even when the recall matches
+nothing. `reflect` calls apply matching directives server-side as well.
+
 ## Scope: host-plane (the bundle), or per-preset (a preset row)
 
 **The install is inert** — the bundle row ships `disabled: true`. Opting in
@@ -46,13 +54,13 @@ isolation is separate banks either way.
 | `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
 | `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
 | `src/client.ts` | the REST transport: one bounded call, one clean bounded error shape |
-| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect` operations — the extension point for new Hindsight operations |
-| `src/snapshot.ts` | auto-recall surface logic: query derivation, hit rendering, latest-only snapshot lookup |
+| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`listDirectives`/`retainDirective` operations — the extension point for new Hindsight operations |
+| `src/snapshot.ts` | auto-recall surface logic: query derivation, hit + standing-rules rendering, latest-only snapshot lookup |
 | `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
 | `src/autorecall.ts` | the `agent/pre-step` listener (bounded lookup + surface commit) |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle (the install step below) |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the reference below) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 26 checks, five mounts — the fifth covers the visibility tiers) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 28 checks, six mounts — the fifth covers the visibility tiers, the sixth the standing directives) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 

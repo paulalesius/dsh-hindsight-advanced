@@ -1,7 +1,10 @@
 /**
  * The automatic per-turn recall: on the first step of each turn the
- * latest user message is queried and the hits become a plugin-sourced
- * snapshot message (the same pattern `time-context` uses for the clock).
+ * latest user message is queried — and the bank's active standing
+ * directives are listed — and both become a plugin-sourced snapshot
+ * message (the same pattern `time-context` uses for the clock). Rules
+ * are rendered in their own section, so a stored rule reaches the model
+ * every turn even when the recall matches nothing.
  *
  * Assembly runs BEFORE the pre-step waterfall, so the memory cannot ride
  * the system prompt for its own turn; the snapshot is instead appended to
@@ -24,8 +27,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
-import { findRetainedSnapshot, queryFromMessages, renderRecall } from './snapshot.ts'
-import type { RecallHit } from './types.ts'
+import { findRetainedSnapshot, queryFromMessages, renderRecall, renderSnapshot } from './snapshot.ts'
+import type { DirectiveRule, RecallHit } from './types.ts'
 
 /** The `agent/pre-step` event payload (the live-runtime event shape). */
 export interface PreStepPayload {
@@ -56,15 +59,22 @@ export function buildAutoRecall(
     // there only dilutes it.
     if (agent.session.header?.origin === 'subagent') return decision
     const query = queryFromMessages(messages)
-    if (query.length === 0) return decision
-    let hits: RecallHit[]
+    // Both lookups ride ONE bounded budget: the shared controller aborts the
+    // whole pair at autoContextTimeoutMs (sequential — the directives list
+    // is cheap, and the shared timeout still bounds the total).
+    let hits: RecallHit[] = []
+    let rules: DirectiveRule[] = []
     try {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), config.autoContextTimeoutMs)
       const onAbort = (): void => controller.abort()
       signal.addEventListener('abort', onAbort, { once: true })
       try {
-        hits = await mount.recall(query, controller.signal, agent.session)
+        const recallPromise = query.length > 0
+          ? mount.recall(query, controller.signal, agent.session)
+          : Promise.resolve<RecallHit[]>([])
+        hits = await recallPromise
+        rules = await mount.listDirectives(controller.signal, agent.session)
       } finally {
         clearTimeout(timer)
         signal.removeEventListener('abort', onAbort)
@@ -72,8 +82,8 @@ export function buildAutoRecall(
     } catch {
       return decision
     }
-    if (hits.length === 0) return decision
-    const text = renderRecall(config.bank, hits)
+    if (hits.length === 0 && rules.length === 0) return decision
+    const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
     const snapshot = createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', sections: [{ name: pluginName, text }] },

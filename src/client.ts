@@ -17,13 +17,14 @@ function failure(path: string, error: unknown): Error {
   return new Error(`hindsight: ${path} failed: ${reason.slice(0, MAX_ERROR_DETAIL_CHARS)}`)
 }
 
-/** One bounded REST call against the Hindsight server. */
+/** One bounded REST call against the Hindsight server. GETs carry no body
+ *  (the query lives in `path`). */
 export async function request(
   config: ResolvedConfig,
   path: string,
   body: unknown,
   signal: AbortSignal,
-  method: 'POST' | 'PATCH' = 'POST',
+  method: 'POST' | 'PATCH' | 'GET' = 'POST',
 ): Promise<Record<string, unknown>> {
   let res: Response
   try {
@@ -33,7 +34,7 @@ export async function request(
         'content-type': 'application/json',
         ...(config.apiKey !== undefined ? { authorization: `Bearer ${config.apiKey}` } : {}),
       },
-      body: JSON.stringify(body),
+      body: method === 'GET' ? undefined : JSON.stringify(body),
       signal,
     })
   } catch (error) {

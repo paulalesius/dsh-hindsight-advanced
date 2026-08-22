@@ -9,7 +9,7 @@
 
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 
-import type { RecallHit } from './types.ts'
+import type { DirectiveRule, RecallHit } from './types.ts'
 
 /** Bound for the recall query drawn from the user message. */
 export const MAX_QUERY_CHARS = 1000
@@ -22,6 +22,23 @@ export function renderRecall(bank: string, hits: RecallHit[]): string {
     lines.push(`- ${hit.text.trim()}${type}`)
   }
   return lines.join('\n')
+}
+
+/** Render the automatic snapshot: the recalled memories, plus the bank's
+ *  standing directives as their OWN section (priority-ordered). Rules reach
+ *  the model in this section even when the recall matched nothing — that is
+ *  what keeps a stored rule from decaying with recall relevance. */
+export function renderSnapshot(bank: string, hits: RecallHit[], rules: DirectiveRule[]): string {
+  const parts: string[] = []
+  if (hits.length > 0) parts.push(renderRecall(bank, hits))
+  if (rules.length > 0) {
+    const lines = [`Standing rules from the Hindsight bank "${bank}" — follow them every turn:`]
+    for (const rule of rules) {
+      lines.push(`- ${rule.content.trim()}`)
+    }
+    parts.push(lines.join('\n'))
+  }
+  return parts.join('\n\n')
 }
 
 /** The latest user-visible text among the step's claimed messages, as a recall query. */

@@ -35,16 +35,23 @@
  *     mount's `retainScope` default) picks `global`, `preset`, or `session`
  *     (see the tier model below). Stored synchronously by default (the call
  *     waits for the bank to process it); `retainAsync: true` acknowledges
- *     fast and runs fact extraction in the background instead.
+ *     fast and runs fact extraction in the background instead. A BEHAVIORAL
+ *     RULE (how to act: "always X", "never do Y") is stored with
+ *     `kind: 'directive'` (+ a short `name`) as a standing directive instead:
+ *     directives are not retrieved by relevance — they are applied, listed
+ *     tier-scoped (the same tag model as memories) and rendered in their own
+ *     "Standing rules" section of the per-turn snapshot, so a stored rule
+ *     reaches the model every turn even when the recall matches nothing.
  *   - `recall` — a targeted semantic search over the mount's bank, scoped
  *     to the session's three visible tiers (below).
  *   - `reflect` — a synthesized answer grounded in the bank's facts, with
  *     the same tier scoping as recall.
  * - automatic recall: on the first step of each turn the latest user message
- *   is queried and the hits become a plugin-sourced snapshot message
- *   (the same pattern `time-context` uses for the clock). The lookup is
- *   bounded and subagent sessions are skipped, so a slow or stopped
- *   Hindsight server never blocks a turn.
+ *   is queried and the bank's active standing directives are listed, and
+ *   both become a plugin-sourced snapshot message (the same pattern
+ *   `time-context` uses for the clock). The lookups share one bounded budget
+ *   and subagent sessions are skipped, so a slow or stopped Hindsight server
+ *   never blocks a turn.
  *
  *   With `latestOnly` (default `true`) exactly one snapshot is ever visible
  *   to the model: each turn's snapshot is appended to the session surface by

@@ -2,9 +2,10 @@
 // Hindsight server: export shape, Config validation (one mount, one bank,
 // the retainScope tier default), per-mount bank behavior (banks are the
 // OUTER isolation; inside a bank, the three visibility tiers), tool
-// execution (retain / recall / reflect, with tier tags), and the automatic
-// pre-step recall — including the latest-only snapshot replacement (the
-// preserve-thinking pattern).
+// execution (retain / recall / reflect, with tier tags, plus standing
+// directives: kind: directive, tier-scoped listing, rules-on-empty-recall),
+// and the automatic pre-step recall — including the latest-only snapshot
+// replacement (the preserve-thinking pattern).
 import assert from 'node:assert/strict'
 import { start, state } from './stub-server.mjs'
 
@@ -221,9 +222,14 @@ async function runStep(listener, a, step, messages) {
   assert.equal(snaps1[0].surfaceOp, 'append', 'first snapshot is a plain append')
   assert.match(snaps1[0].data.content[0].text, /Relevant memories from the Hindsight bank "hermes"/)
   assert.match(snaps1[0].data.content[0].text, /prefers tabs over spaces/)
-  const autoReq = state.requests.at(-1)
-  assert.equal(autoReq.path, '/v1/default/banks/hermes/memories/recall')
-  assert.equal(autoReq.body.query, 'which editor does the user prefer?')
+  const autoReq = state.requests.filter(request =>
+    request.path === '/v1/default/banks/hermes/memories/recall'
+    && request.body.query === 'which editor does the user prefer?',
+  ).at(-1)
+  assert.ok(autoReq, 'the auto-recall hit the stub')
+  const autoRulesReq = state.requests.filter(request => request.path === '/v1/default/banks/hermes/directives').at(-1)
+  assert.ok(autoRulesReq, 'the auto-lookup also listed standing rules')
+  assert.ok(autoRulesReq.query.includes('active_only=true'), 'only active rules are listed')
   console.log('ok  mount A: auto-recall commits one snapshot to the surface')
 
   // Turn 2, different query: the new snapshot REPLACES the old one. The
@@ -448,6 +454,76 @@ async function runStep(listener, a, step, messages) {
   assert.equal(autoReq.body.tags_match, 'any')
   assert.match(snapshots(alice.session)[0].data.content[0].text, /Fridays/)
   console.log('ok  mount E: the automatic pre-step recall is tier-scoped too')
+}
+
+// ── mount F: standing directives — rules are applied, not recalled ──────────
+{
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'rules' })
+  const tool = ctx.tools.registered[0]
+  const listener = ctx.listeners[0].fn
+
+  // the tool exposes kind + name for directive retains
+  assert.deepEqual(tool.parameters.properties.kind.enum, ['memory', 'directive'])
+  assert.ok(tool.parameters.properties.name, 'the name parameter exists for directives')
+
+  const alice = { session: makeSession('sess-r1', { agentPreset: 'standard' }) }
+  const carol = { session: makeSession('sess-r2', { agentPreset: 'code' }) }
+
+  // a directive retained with the default scope lands with exactly the preset tier tag
+  const directiveResult = await tool.execute(
+    { action: 'retain', kind: 'directive', name: 'tabs', text: 'Always use tabs in this project.' },
+    { agent: alice, signal: baseSignal },
+  )
+  assert.match(directiveResult.text, /standing directive "tabs"/)
+  let req = state.requests.at(-1)
+  assert.equal(req.method, 'POST')
+  assert.equal(req.path, '/v1/default/banks/rules/directives')
+  assert.deepEqual(req.body, { name: 'tabs', content: 'Always use tabs in this project.', is_active: true, tags: ['preset:standard'] })
+
+  // scope: 'global' — untagged, visible to every session of the bank
+  await tool.execute(
+    { action: 'retain', kind: 'directive', name: 'no-force-push', text: 'Never force-push to shared branches.', scope: 'global' },
+    { agent: alice, signal: baseSignal },
+  )
+  req = state.requests.at(-1)
+  assert.deepEqual(req.body, { name: 'no-force-push', content: 'Never force-push to shared branches.', is_active: true })
+
+  // a directive without a name is rejected before it touches the server
+  await assert.rejects(
+    () => tool.execute({ action: 'retain', kind: 'directive', text: 'A rule with no name.' }, { agent: alice, signal: baseSignal }),
+    /name/,
+  )
+
+  // the pre-step listing is tier-scoped like recall; same preset sees the
+  // preset rule + the global one
+  await runStep(listener, alice, 1, [userMsg('what formatting rule applies here?')])
+  const rulesReq = state.requests.filter(request => request.path === '/v1/default/banks/rules/directives').at(-1)
+  assert.ok(rulesReq.query.includes('active_only=true'))
+  assert.ok(rulesReq.query.includes(`${encodeURIComponent('session:sess-r1')},${encodeURIComponent('preset:standard')}`),
+    'the listing carries the session tier tags')
+  const aliceSnap = snapshots(alice.session).at(-1).data.content[0].text
+  assert.match(aliceSnap, /Standing rules from the Hindsight bank "rules"/)
+  assert.match(aliceSnap, /Always use tabs in this project/)
+  assert.match(aliceSnap, /Never force-push to shared branches/)
+
+  // another preset sees only the global rule
+  await runStep(listener, carol, 1, [userMsg('what formatting rule applies here?')])
+  const carolSnap = snapshots(carol.session).at(-1).data.content[0].text
+  assert.match(carolSnap, /Never force-push to shared branches/, 'the global rule is visible to everyone')
+  assert.doesNotMatch(carolSnap, /Always use tabs/, "another preset's rule is invisible")
+  console.log('ok  mount F: directives carry the tier model; the pre-step listing is tier-scoped')
+
+  // the core fix: a rule reaches the model even when the recall matched
+  // nothing (rules are applied, not retrieved by relevance)
+  const dave = { session: makeSession('sess-r3', { agentPreset: 'standard' }) }
+  await runStep(listener, dave, 1, [userMsg('tell me a story about zzzzzz')])
+  const daveSnap = snapshots(dave.session).at(-1)
+  assert.ok(daveSnap, 'an empty recall still commits a snapshot when rules are active')
+  assert.doesNotMatch(daveSnap.data.content[0].text, /Relevant memories/, 'no memory section when the recall is empty')
+  assert.match(daveSnap.data.content[0].text, /Standing rules/)
+  assert.match(daveSnap.data.content[0].text, /Always use tabs in this project/)
+  console.log('ok  mount F: a standing rule reaches the model even on an empty recall')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

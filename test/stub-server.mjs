@@ -4,6 +4,7 @@ import http from 'node:http'
 
 export const state = {
   memories: [],
+  directives: [],
   requests: [],
   nextId: 1,
   bankConfigs: {},
@@ -24,7 +25,7 @@ const server = http.createServer((req, res) => {
     }
     let data = {}
     try { data = body.length > 0 ? JSON.parse(body) : {} } catch { data = { error: 'unparseable body' } }
-    state.requests.push({ method: req.method, path: url.pathname, bank, body: data })
+    state.requests.push({ method: req.method, path: url.pathname, query: url.search, bank, body: data })
 
     if (req.method === 'POST' && rest[0] === 'memories' && rest.length === 1) {
       // retain
@@ -61,6 +62,31 @@ const server = http.createServer((req, res) => {
       if (bank === 'flaky') return json(500, { error: 'stub: flaky bank' })
       state.bankConfigs[bank] = { ...(state.bankConfigs[bank] ?? {}), ...(data.updates ?? {}) }
       return json(200, { bank_id: bank, overrides: state.bankConfigs[bank] })
+    }
+    if (req.method === 'GET' && rest[0] === 'directives') {
+      // list active directives; like recall, untagged (global) directives are
+      // included in every mode, and a tag filter selects matching tiers
+      let items = state.directives.filter(directive => directive.bank === bank && directive.is_active !== false)
+      const tagsParam = url.searchParams.get('tags')
+      if (tagsParam !== null && tagsParam.length > 0) {
+        const tags = tagsParam.split(',').filter(tag => tag.length > 0)
+        items = items.filter(directive => directive.tags.length === 0 || tags.some(tag => directive.tags.includes(tag)))
+      }
+      return json(200, { items })
+    }
+    if (req.method === 'POST' && rest[0] === 'directives' && rest.length === 1) {
+      // create directive
+      state.directives.push({
+        id: `d${state.nextId++}`,
+        bank,
+        name: String(data.name ?? ''),
+        content: String(data.content ?? ''),
+        priority: typeof data.priority === 'number' ? data.priority : 0,
+        is_active: data.is_active !== false,
+        tags: Array.isArray(data.tags) ? [...data.tags] : [],
+      })
+      const created = state.directives.at(-1)
+      return json(200, { id: created.id, bank_id: bank, name: created.name })
     }
     if (req.method === 'POST' && rest[0] === 'reflect') {
       // reflect
