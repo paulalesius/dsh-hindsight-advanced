@@ -25,6 +25,7 @@ import type { UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
 import { findRetainedSnapshot, queryFromMessages, renderRecall } from './snapshot.ts'
+import type { RecallHit } from './types.ts'
 
 /** The `agent/pre-step` event payload (the live-runtime event shape). */
 export interface PreStepPayload {
@@ -56,7 +57,7 @@ export function buildAutoRecall(
     if (agent.session.header?.origin === 'subagent') return decision
     const query = queryFromMessages(messages)
     if (query.length === 0) return decision
-    let hits
+    let hits: RecallHit[]
     try {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), config.autoContextTimeoutMs)
