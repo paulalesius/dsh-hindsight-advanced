@@ -1,0 +1,66 @@
+/**
+ * The automatic-recall surface logic: derive the recall query from the
+ * step's messages, render hits as the model-facing memory text, and find
+ * this mount's most recent snapshot still on the model-visible surface
+ * (the `latestOnly` / preserve-thinking mechanism).
+ *
+ * @module dsh-plugin-hindsight/snapshot
+ */
+
+import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
+
+import type { RecallHit } from './types.ts'
+
+/** Bound for the recall query drawn from the user message. */
+export const MAX_QUERY_CHARS = 1000
+
+/** Render hits as the model-facing memory text. */
+export function renderRecall(bank: string, hits: RecallHit[]): string {
+  const lines = [`Relevant memories from the Hindsight bank "${bank}":`]
+  for (const hit of hits) {
+    const type = typeof hit.type === 'string' && hit.type.length > 0 ? ` (${hit.type})` : ''
+    lines.push(`- ${hit.text.trim()}${type}`)
+  }
+  return lines.join('\n')
+}
+
+/** The latest user-visible text among the step's claimed messages, as a recall query. */
+export function queryFromMessages(messages: readonly UserMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message === undefined || !Array.isArray(message.content)) continue
+    const text = message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join(' ')
+      .trim()
+    if (text.length > 0) return text.slice(0, MAX_QUERY_CHARS)
+  }
+  return ''
+}
+
+/** The plain text of a snapshot message; `''` when it is not one text block. */
+function snapshotText(message: UserMessage): string {
+  if (message.content.length !== 1) return ''
+  const [block] = message.content
+  return block?.type === 'text' ? block.text : ''
+}
+
+/**
+ * `session`'s most recent plugin snapshot message (sourced by
+ * `pluginName`) still on the model-visible surface (not shadowed by
+ * compaction). Scans the durable log from the end: snapshots are appended
+ * in time order, so the newest is the last match.
+ */
+export function findRetainedSnapshot(session: Session, pluginName: string): { seq: number; text: string } | undefined {
+  const onSurface = new Set(session.surface.nodes)
+  const events = session.events
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined || event.type !== 'user/message') continue
+    const source = event.data.source
+    if (source.kind !== 'plugin' || source.plugin !== pluginName) continue
+    if (onSurface.has(event.seq)) return { seq: event.seq, text: snapshotText(event.data) }
+  }
+  return undefined
+}
