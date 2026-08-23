@@ -38,14 +38,16 @@ see **Enable and configure**):
   (`disabled: false`): active in every web-profile session, one bank for
   all of them.
 - **per-preset** — a row in a preset's own `agent.cordis.yml`: active only
-  in that preset's sessions, with its own `config` block, so "bank `hermes`
-  for standard, `dsh-code` for code" is two preset rows. Presets without
-  the row are mount-less: no tool, no auto-recall.
+  in that preset's sessions, with its own `config` block. Presets normally
+  point at the same bank — the `preset` visibility scope (below) already
+  keeps each preset's memories apart. Presets without the row are
+  mount-less: no tool, no auto-recall.
 
 The preset row uses the bare `name: dsh-plugin-hindsight-advanced` — the preset
 mount re-anchors bare specifiers to the host composition, so the profile's
 `node_modules` copy resolves. The plugin never reads the session's preset;
-isolation is separate banks either way.
+separation inside a bank is by scope (global / preset / session), and a
+separate `bank` per row is for a genuinely separate memory surface.
 
 ## Install (web profile)
 
@@ -250,6 +252,6 @@ node --import ./register.mjs live.mjs     # real server, scratch bank, self-clea
 ```
 
 `live.mjs` talks to `http://127.0.0.1:9177` and never touches the real
-`hermes` bank. It reads the key from the `HINDSIGHT_API_KEY` environment
+banks (it works on a scratch bank). It reads the key from the `HINDSIGHT_API_KEY` environment
 variable (the same name its `apiKeyRef` config resolves) and exits with a
 message if it is not set: `HINDSIGHT_API_KEY=… node --import ./register.mjs live.mjs`.

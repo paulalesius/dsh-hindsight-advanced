@@ -3,22 +3,25 @@
  *
  * This plugin is a plain in-process plugin: a small tree of dependency-light
  * ESM modules (this entry file plus `src/`) that each PRESET that wants
- * memory mounts with its own row in its own `agent.cordis.yml`, carrying its
- * own `bank`. The plugin is preset-agnostic — it never reads the session's
- * `agentPreset` for isolation; a different bank per preset is expressed by
- * mounting the row in different presets with different configs:
+ * memory mounts with its own row in its own `agent.cordis.yml`. The plugin
+ * is preset-agnostic — it never reads the session's `agentPreset` for
+ * isolation. What separates the presets' memories is the visibility scope
+ * inside the bank (the `global` / `preset` / `session` model below):
+ * presets normally share ONE bank and the preset scope already keeps their
+ * memories apart. A different `bank` per row is for genuinely separate
+ * memory surfaces (or a different Hindsight server) only:
  *
  *   # ~/.dsh/.agent-presets/standard/agent.cordis.yml
  *   - id: hindsight
  *     name: ./hindsight-advanced.ts
  *     config:
- *       bank: hermes
+ *       bank: dsh
  *
  *   # ~/.dsh/.agent-presets/code/agent.cordis.yml
  *   - id: hindsight
  *     name: ./hindsight-advanced.ts
  *     config:
- *       bank: dsh-code
+ *       bank: dsh
  *
  * Presets without the row get no `hindsight` tool at all — there is no
  * unmapped/inert state to configure. A session gets the tool, the automatic

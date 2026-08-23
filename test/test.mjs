@@ -326,7 +326,7 @@ async function runStep(listener, a, step, messages) {
   console.log('ok  mount A: step 2, subagents, and rejections pass through')
 }
 
-// ── mount B: bank dsh-code — the banks themselves are the isolation ─────────
+// ── mount B: bank dsh-code — a separate bank is a separate surface ──────────
 {
   const ctx = makeCtx()
   plugin.apply(ctx, validate({ bank: 'dsh-code', baseUrl: stubUrl }).value)

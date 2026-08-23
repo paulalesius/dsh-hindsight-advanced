@@ -6,7 +6,7 @@
 // tier filter (own + preset tiers visible, a sibling session's tier not).
 //
 // Uses a scratch bank (auto-created by the server) and deletes it at the end,
-// so the user's real `hermes` bank is never touched.
+// so the user's real banks are never touched.
 //
 //   HINDSIGHT_API_KEY=… node --import ./register.mjs live.mjs
 import assert from 'node:assert/strict'
