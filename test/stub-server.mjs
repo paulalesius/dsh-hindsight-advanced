@@ -25,7 +25,7 @@ const server = http.createServer((req, res) => {
     }
     let data = {}
     try { data = body.length > 0 ? JSON.parse(body) : {} } catch { data = { error: 'unparseable body' } }
-    state.requests.push({ method: req.method, path: url.pathname, query: url.search, bank, body: data })
+    state.requests.push({ method: req.method, path: url.pathname, query: url.search, bank, body: data, authorization: req.headers.authorization ?? null })
 
     if (req.method === 'POST' && rest[0] === 'memories' && rest.length === 1) {
       // retain

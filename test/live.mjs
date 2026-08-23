@@ -8,11 +8,20 @@
 // Uses a scratch bank (auto-created by the server) and deletes it at the end,
 // so the user's real `hermes` bank is never touched.
 //
-//   node --import ./register.mjs live.mjs
+//   HINDSIGHT_API_KEY=… node --import ./register.mjs live.mjs
 import assert from 'node:assert/strict'
 
 const BASE = 'http://127.0.0.1:9177'
-const API_KEY = 'local-key'
+// The key never lives in this file: the plugin mounts with the production
+// apiKeyRef shape and resolves the value through the launch environment
+// (no credentials seam in this bare composition). The direct fetch calls
+// below use the same value.
+const API_KEY_REF = 'HINDSIGHT_API_KEY'
+const API_KEY = process.env[API_KEY_REF]
+if (API_KEY === undefined || API_KEY.length === 0) {
+  console.error(`live.mjs: set ${API_KEY_REF} in the environment (the value the apiKeyRef resolves to) to run the live round-trip`)
+  process.exit(1)
+}
 const BANK = 'dsh-plugin-smoke'
 const PLUGIN = 'file:///home/noname/deepseek-harness/dsh-plugins/hindsight-advanced/hindsight-advanced.ts'
 
@@ -25,6 +34,9 @@ function makeCtx() {
     tools: { registered: [], register(tool) { this.registered.push(tool) } },
     listeners: [],
     on(event, fn, options) { this.listeners.push({ event, fn, options }) },
+    // no seam in this bare composition: the plugin falls back to the
+    // launch environment (process.env) for the apiKeyRef
+    get: () => undefined,
   }
 }
 const signal = new AbortController().signal
@@ -39,16 +51,21 @@ const bob = { session: { id: 'live-sess-b', header: { agentPreset: 'smoke-preset
 // bankConfig rides the first memory operation as a PATCH .../config and is
 // durable server state: assert the mission actually landed via GET.
 const MISSION = 'Focus on the live-demo project: build steps and deployment target.'
-const ctx = makeCtx()
-plugin.apply(ctx, {
+// The production shape: the loader validates the row's config before
+// apply, so feed the row through the plugin's own validator and apply the
+// resolved (fully defaulted) value — not a hand-assembled raw object.
+const resolved = plugin.Config['~standard'].validate({
   bank: BANK,
   baseUrl: BASE,
-  apiKey: API_KEY,
+  apiKeyRef: API_KEY_REF,
   autoContext: true,
   maxRecallTokens: 1024,
   autoContextTimeoutMs: 2500,
   bankConfig: { retain_mission: MISSION },
 })
+assert.ok('value' in resolved, JSON.stringify(resolved))
+const ctx = makeCtx()
+plugin.apply(ctx, resolved.value)
 assert.equal(ctx.tools.registered.length, 1, 'one tool registered')
 const tool = ctx.tools.registered[0]
 assert.equal(tool.name, 'hindsight')

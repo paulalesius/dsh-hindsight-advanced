@@ -29,8 +29,14 @@
         # Hindsight REST base. Default: http://127.0.0.1:8888
         baseUrl: http://127.0.0.1:9177
 
-        # Optional; sent as Authorization: Bearer <key> on every call.
-        apiKey: local-key
+        # Optional; a CREDENTIAL REFERENCE, not the key — the value is
+        # resolved per call through the credentials seam (process env,
+        # ~/.dsh/.credentials.yaml, .env files), so the secret lives in the
+        # 0600 store, never in this file. Add, e.g.:
+        #   refs:
+        #     HINDSIGHT_API_KEY: <the server's Bearer token>
+        # to ~/.dsh/.credentials.yaml (or export it in the environment).
+        apiKeyRef: HINDSIGHT_API_KEY
 
         # true — automatic recall on the first step of each turn. false — the
         # hindsight tool stays, the automatic recall goes.

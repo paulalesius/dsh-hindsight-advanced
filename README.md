@@ -120,7 +120,7 @@ honors row-level `disabled` by never activating the entry.
   config:
     bank: my-bank                     # REQUIRED — the only key with no default
     baseUrl: http://127.0.0.1:9177    # repeat: not a code default (default 8888)
-    apiKey: local-key                 # repeat: no code default
+    apiKeyRef: HINDSIGHT_API_KEY      # repeat: no code default (a REF, not the key)
     bankConfig:
       retain_mission: "…what to retain…"
 ```
@@ -135,7 +135,7 @@ leaving the bundle row disabled:
   config:
     bank: my-bank
     baseUrl: http://127.0.0.1:9177
-    apiKey: local-key
+    apiKeyRef: HINDSIGHT_API_KEY
     bankConfig:
       retain_mission: "…what to retain…"
 ```
@@ -144,7 +144,7 @@ Both options: an id-targeted `config` **replaces the whole block** —
 `applyEntryPatches` assigns entry keys, it does not deep-merge
 (`target[key] = value`). List every key the plugin needs; keys you omit
 fall back to the code defaults in the reference below (so `bank` is the
-only strictly required key, and `baseUrl`/`apiKey` are worth repeating
+only strictly required key, and `baseUrl`/`apiKeyRef` are worth repeating
 because their code defaults are `:8888`/none). `- id: hindsight` with
 `disabled: true` turns a live mount back off. Restart `dsh web` afterwards.
 
@@ -161,13 +161,22 @@ appends its own snapshot to the same session surface.
 | --- | --- | --- |
 | `bank` | — | REQUIRED. Hindsight bank id (case-sensitive; the server auto-creates a bank on first use) |
 | `baseUrl` | `http://127.0.0.1:8888` | Hindsight REST base |
-| `apiKey` | — | optional; `Authorization: Bearer <key>` on every call |
+| `apiKey` | — | optional literal key; `Authorization: Bearer <key>` on every call. Mutually exclusive with `apiKeyRef` — prefer the ref |
+| `apiKeyRef` | — | optional CREDENTIAL REFERENCE (a POSIX identifier such as `HINDSIGHT_API_KEY`); the value is resolved per call through the credentials seam — process env, `~/.dsh/.credentials.yaml` (`refs:` section), and `.env` files, most trusted first — so the secret never appears in config files and a rotation needs no restart |
 | `autoContext` | `true` | `false` disables the per-turn automatic recall (the tool stays) |
 | `retainAsync` | `false` | synchronous by default: the retain call waits for the bank to process the memory; `true` acknowledges fast and runs fact extraction in the background |
 | `maxRecallTokens` | `1024` | recall response token budget |
 | `autoContextTimeoutMs` | `2500` | bound for the automatic lookup |
 | `retainScope` | `preset` | the visibility tier `retain` uses when the model omits the `scope` parameter: `global` (every session of the bank), `preset` (this agent preset's sessions), `session` (this session only) |
 | `bankConfig` | — | optional; a flat object of Hindsight per-bank config overrides — the **server-side extraction policy** (e.g. `retain_mission`, the "what to retain" instruction injected into the bank's fact-extraction prompt); applied once before the first memory operation, see Behavior |
+
+**Where the key lives** — `apiKeyRef` is only a name; the value is resolved
+on every call, most trusted first: the process environment, then
+`~/.dsh/.credentials.yaml` (the `refs:` section — a 0600 store, e.g.
+`refs: / HINDSIGHT_API_KEY: <token>`), then the project and user `.env`
+files. Because resolution is per call, editing the store (or exporting the
+env var) takes effect on the next operation — no restart, no config edit,
+and the secret appears nowhere in a file that gets committed or shipped.
 
 ## Behavior
 
@@ -236,9 +245,11 @@ live in the Hindsight server).
 
 ```bash
 cd test
-node --import ./register.mjs test.mjs     # stub server, 26 checks
+node --import ./register.mjs test.mjs     # stub server, 28 checks
 node --import ./register.mjs live.mjs     # real server, scratch bank, self-cleaning
 ```
 
-`live.mjs` talks to `http://127.0.0.1:9177` (key `local-key` on the
-reference deployment) and never touches the real `hermes` bank.
+`live.mjs` talks to `http://127.0.0.1:9177` and never touches the real
+`hermes` bank. It reads the key from the `HINDSIGHT_API_KEY` environment
+variable (the same name its `apiKeyRef` config resolves) and exits with a
+message if it is not set: `HINDSIGHT_API_KEY=… node --import ./register.mjs live.mjs`.

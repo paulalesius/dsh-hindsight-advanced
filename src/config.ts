@@ -15,6 +15,11 @@ export interface ResolvedConfig {
   baseUrl: string
   /** Optional API key, sent as a Bearer token; `undefined` sends no auth header. */
   apiKey?: string
+  /** Optional credential REFERENCE (a POSIX identifier such as `HINDSIGHT_API_KEY`);
+   *  the VALUE is resolved per call through the credentials seam (which layers
+   *  process env, `$DSH_HOME/.credentials.yaml`, and `.env` files) — never stored
+   *  here. Mutually exclusive with the literal `apiKey`. */
+  apiKeyRef?: string
   /** The per-turn automatic recall is active. */
   autoContext: boolean
   /** `true`: retain acknowledges fast and runs fact extraction in the
@@ -37,6 +42,10 @@ export interface ResolvedConfig {
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8888'
 const DEFAULT_MAX_RECALL_TOKENS = 1024
 const DEFAULT_AUTO_CONTEXT_TIMEOUT_MS = 2500
+/** Credential-reference grammar (a POSIX shell identifier), matching the
+ *  credentials seam's own `CredentialRef` so an invalid name is a config
+ *  issue rather than a per-call resolution surprise. */
+const API_KEY_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 interface ConfigIssue {
   message: string
@@ -130,6 +139,24 @@ export const Config: {
         }
       }
 
+      let apiKeyRef: string | undefined
+      if (record.apiKeyRef !== undefined) {
+        if (typeof record.apiKeyRef !== 'string' || !API_KEY_REF_PATTERN.test(record.apiKeyRef)) {
+          issues.push({
+            message: 'apiKeyRef must be a POSIX identifier (e.g. HINDSIGHT_API_KEY)',
+            path: ['apiKeyRef'],
+          })
+        } else {
+          apiKeyRef = record.apiKeyRef
+        }
+      }
+      if (record.apiKey !== undefined && record.apiKeyRef !== undefined) {
+        issues.push({
+          message: 'set apiKey OR apiKeyRef, not both',
+          path: ['apiKey', 'apiKeyRef'],
+        })
+      }
+
       let bankConfig: Record<string, string> | undefined
       if (record.bankConfig !== undefined) {
         const raw = record.bankConfig
@@ -161,6 +188,7 @@ export const Config: {
         bank: bank ?? '',
         baseUrl,
         ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(apiKeyRef !== undefined ? { apiKeyRef } : {}),
         ...(bankConfig !== undefined ? { bankConfig } : {}),
         autoContext: boolFlag(record, 'autoContext', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),

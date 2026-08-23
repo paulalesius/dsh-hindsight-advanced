@@ -85,6 +85,11 @@
  *   auto-creates a bank on first use).
  * - `baseUrl` — Hindsight REST base; default `http://127.0.0.1:8888`.
  * - `apiKey` — optional; sent as `Authorization: Bearer <key>` on every call.
+ * - `apiKeyRef` — optional CREDENTIAL REFERENCE (a POSIX identifier such as
+ *   `HINDSIGHT_API_KEY`) instead of the value: the value is resolved per call
+ *   through the credentials seam (process env, `$DSH_HOME/.credentials.yaml`,
+ *   and `.env` files, most trusted first), so config files never carry the
+ *   secret and a rotation needs no restart. Mutually exclusive with `apiKey`.
  * - `autoContext` — default `true`; `false` disables the per-turn recall
  *   (the tool stays available).
  * - `retainAsync` — default `false` (synchronous: the retain call waits for
@@ -120,6 +125,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 
 import { buildAutoRecall } from './src/autorecall.ts'
 import { createMount } from './src/bank.ts'
@@ -136,6 +142,33 @@ export const inject = ['tools']
 export { Config }
 
 /**
+ * Build the mount's per-operation authorization resolver: a literal
+ * `apiKey` is returned as-is; an `apiKeyRef` is resolved per call through
+ * the credentials seam (process env, `$DSH_HOME/.credentials.yaml`, and
+ * `.env` files, most trusted first) — and, in a composition without the
+ * seam, through the launch environment, which is then the whole credential
+ * plane. The seam is OPTIONAL on purpose: it is read with `ctx.get`, so the
+ * plugin still mounts where no credentials provider is registered.
+ * @param ctx - plugin context owning the seam and launch-environment slots.
+ * @param config - validated plugin configuration.
+ */
+function buildResolveApiKey(
+  ctx: Context,
+  config: ResolvedConfig,
+): () => Promise<string | undefined> {
+  if (config.apiKeyRef === undefined) {
+    return async () => config.apiKey
+  }
+  const ref = config.apiKeyRef
+  return async () => {
+    const credentials = ctx.get('credentials')
+    if (credentials !== undefined) return (await credentials.resolve(ref))?.value
+    const ambient = launchEnvironmentOf(ctx).get(ref)
+    return ambient !== undefined && ambient.value.length > 0 ? ambient.value : undefined
+  }
+}
+
+/**
  * Register the hindsight tool and the automatic per-turn recall for the
  * lifetime of `ctx`. The bank is fixed by `config` for every session this
  * mount reaches.
@@ -144,7 +177,7 @@ export { Config }
  */
 export function apply(ctx: Context, config: ResolvedConfig): void {
   /** One mount: the bank's operations and its per-mount state. */
-  const mount = createMount(config)
+  const mount = createMount(config, buildResolveApiKey(ctx, config))
 
   ctx.on('agent/pre-step', buildAutoRecall(mount, name), { prepend: true })
 

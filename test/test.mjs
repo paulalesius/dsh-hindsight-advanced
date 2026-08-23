@@ -1,7 +1,9 @@
 // Smoke test for the userland hindsight plugin, driven against the stub
 // Hindsight server: export shape, Config validation (one mount, one bank,
-// the retainScope tier default), per-mount bank behavior (banks are the
-// OUTER isolation; inside a bank, the three visibility tiers), tool
+// the retainScope tier default, the apiKeyRef grammar + mutual exclusion
+// with apiKey), per-mount bank behavior (banks are the OUTER isolation;
+// inside a bank, the three visibility tiers), authorization (literal key,
+// credential ref via the seam, ref via the environment fallback), tool
 // execution (retain / recall / reflect, with tier tags, plus standing
 // directives: kind: directive, tier-scoped listing, rules-on-empty-recall),
 // and the automatic pre-step recall: snapshot rows ride the pre-step
@@ -62,6 +64,15 @@ const badInt = validate({ bank: 'x', maxRecallTokens: 'large' })
 assert.ok('issues' in badInt && badInt.issues.some(issue => issue.path?.[0] === 'maxRecallTokens'))
 const badRetain = validate({ bank: 'x', retainAsync: 'yes' })
 assert.ok('issues' in badRetain && badRetain.issues.some(issue => issue.path?.[0] === 'retainAsync'))
+// apiKeyRef: a credential REFERENCE name (POSIX identifier), never the value
+const withRef = validate({ bank: 'x', apiKeyRef: 'HINDSIGHT_API_KEY' })
+assert.ok('value' in withRef, JSON.stringify(withRef))
+assert.equal(withRef.value.apiKeyRef, 'HINDSIGHT_API_KEY')
+assert.equal(withRef.value.apiKey, undefined)
+const badRef = validate({ bank: 'x', apiKeyRef: 'nope key' })
+assert.ok('issues' in badRef && badRef.issues.some(issue => issue.path?.[0] === 'apiKeyRef'), JSON.stringify(badRef))
+const bothKeys = validate({ bank: 'x', apiKey: 'literal', apiKeyRef: 'HINDSIGHT_API_KEY' })
+assert.ok('issues' in bothKeys && bothKeys.issues.some(issue => issue.message === 'set apiKey OR apiKeyRef, not both'), JSON.stringify(bothKeys))
 // bankConfig: a flat object of string overrides, forwarded verbatim
 const withConfig = validate({ bank: 'x', bankConfig: { retain_mission: 'Focus on coding work.', retain_extraction_mode: 'custom' } })
 assert.ok('value' in withConfig, JSON.stringify(withConfig))
@@ -76,7 +87,9 @@ assert.equal(trimmed.value.baseUrl, 'http://127.0.0.1:8888')
 console.log('ok  Config validator (required bank, defaults, trimming, issues)')
 
 // ── a minimal plugin context ────────────────────────────────────────────────
-function makeCtx() {
+// `extra` stands in for seam services the plugin may read with ctx.get
+// (e.g. a credentials stub); everything else reads as unprovided.
+function makeCtx(extra = {}) {
   return {
     tools: {
       registered: [],
@@ -84,6 +97,7 @@ function makeCtx() {
     },
     listeners: [],
     on(event, fn, options) { this.listeners.push({ event, fn, options }) },
+    get(name) { return extra[name] },
   }
 }
 
@@ -157,6 +171,34 @@ async function runStep(listener, a, step, messages) {
     for (const message of decision.messages) a.session.append('user/message', message, { surfaceOp: 'append' })
   }
   return decision
+}
+
+// ── authorization: literal key, credential ref (seam), ref (env fallback) ───
+{
+  // literal apiKey → Bearer header on every call
+  const ctxLiteral = makeCtx()
+  plugin.apply(ctxLiteral, { bank: 'authz', baseUrl: stubUrl, apiKey: 'literal-key' })
+  await ctxLiteral.tools.registered[0].execute({ action: 'recall', query: 'authz probe' }, { signal: baseSignal })
+  assert.equal(state.requests.at(-1).authorization, 'Bearer literal-key')
+
+  // apiKeyRef resolved per call through the credentials seam (ctx.get)
+  const ctxSeam = makeCtx({ credentials: { resolve: async ref => ({ value: `seam-key:${ref}`, source: 'file' }) } })
+  plugin.apply(ctxSeam, { bank: 'authz', baseUrl: stubUrl, apiKeyRef: 'HINDSIGHT_API_KEY' })
+  await ctxSeam.tools.registered[0].execute({ action: 'recall', query: 'authz probe' }, { signal: baseSignal })
+  assert.equal(state.requests.at(-1).authorization, 'Bearer seam-key:HINDSIGHT_API_KEY')
+
+  // no seam in this composition: the launch environment is the whole
+  // credential plane — the ref names an environment variable
+  process.env.HINDSIGHT_ENV_FALLBACK_KEY = 'env-key'
+  try {
+    const ctxEnv = makeCtx()
+    plugin.apply(ctxEnv, { bank: 'authz', baseUrl: stubUrl, apiKeyRef: 'HINDSIGHT_ENV_FALLBACK_KEY' })
+    await ctxEnv.tools.registered[0].execute({ action: 'recall', query: 'authz probe' }, { signal: baseSignal })
+    assert.equal(state.requests.at(-1).authorization, 'Bearer env-key')
+  } finally {
+    delete process.env.HINDSIGHT_ENV_FALLBACK_KEY
+  }
+  console.log('ok  authorization: literal apiKey / apiKeyRef via seam / apiKeyRef via environment')
 }
 
 // ── mount A: bank hermes (what `standard` would mount) ──────────────────────

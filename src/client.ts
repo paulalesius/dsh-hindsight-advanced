@@ -18,13 +18,15 @@ function failure(path: string, error: unknown): Error {
 }
 
 /** One bounded REST call against the Hindsight server. GETs carry no body
- *  (the query lives in `path`). */
+ *  (the query lives in `path`). `apiKey` is the CURRENT authorization value,
+ *  resolved by the caller per operation (never cached across operations). */
 export async function request(
   config: ResolvedConfig,
   path: string,
   body: unknown,
   signal: AbortSignal,
   method: 'POST' | 'PATCH' | 'GET' = 'POST',
+  apiKey?: string,
 ): Promise<Record<string, unknown>> {
   let res: Response
   try {
@@ -32,7 +34,7 @@ export async function request(
       method,
       headers: {
         'content-type': 'application/json',
-        ...(config.apiKey !== undefined ? { authorization: `Bearer ${config.apiKey}` } : {}),
+        ...(apiKey !== undefined && apiKey.length > 0 ? { authorization: `Bearer ${apiKey}` } : {}),
       },
       body: method === 'GET' ? undefined : JSON.stringify(body),
       signal,

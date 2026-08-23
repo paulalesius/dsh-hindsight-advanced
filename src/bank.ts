@@ -53,10 +53,28 @@ export interface Mount {
   ): Promise<void>
 }
 
-/** Build the operations for one mount, owning its per-mount state. */
-export function createMount(config: ResolvedConfig): Mount {
+/**
+ * Build the operations for one mount, owning its per-mount state.
+ * @param resolveApiKey - resolves the CURRENT authorization value per call
+ *  (a literal key, or a credential reference resolved through the seam);
+ *  `undefined` sends no auth header. Resolution is per operation, never
+ *  cached across them, so a rotated credential reaches the next operation.
+ */
+export function createMount(
+  config: ResolvedConfig,
+  resolveApiKey: () => Promise<string | undefined> = async () => undefined,
+): Mount {
   /** The mount's bank. */
   const bankPath = `/v1/default/banks/${encodeURIComponent(config.bank)}`
+
+  /** One request bound to the mount's current authorization value. */
+  const call = async (
+    path: string,
+    body: unknown,
+    signal: AbortSignal,
+    method: 'POST' | 'PATCH' | 'GET' = 'POST',
+  ): Promise<Record<string, unknown>> =>
+    request(config, path, body, signal, method, await resolveApiKey())
 
   // ── bank config sync ──────────────────────────────────────────────────────
   //
@@ -73,7 +91,7 @@ export function createMount(config: ResolvedConfig): Mount {
   function syncBankConfig(signal: AbortSignal): Promise<void> {
     if (bankConfigSynced || bankConfigUpdates === undefined) return Promise.resolve()
     if (bankConfigPending === undefined) {
-      bankConfigPending = request(config, `${bankPath}/config`, { updates: bankConfigUpdates }, signal, 'PATCH')
+      bankConfigPending = call(`${bankPath}/config`, { updates: bankConfigUpdates }, signal, 'PATCH')
         .then(() => { bankConfigSynced = true })
         .catch(() => { bankConfigPending = undefined })
     }
@@ -105,7 +123,7 @@ export function createMount(config: ResolvedConfig): Mount {
       }
       if (options?.types !== undefined && options.types.length > 0) body.types = [...options.types]
       withTierFilter(body, session)
-      const data = await request(config, `${bankPath}/memories/recall`, body, signal)
+      const data = await call(`${bankPath}/memories/recall`, body, signal)
       const results = data.results
       if (!Array.isArray(results)) return []
       return results
@@ -129,14 +147,14 @@ export function createMount(config: ResolvedConfig): Mount {
       if (tags.length > 0) item.tags = tags
       const body: Record<string, unknown> = { items: [item] }
       if (config.retainAsync) body.async = true
-      await request(config, `${bankPath}/memories`, body, signal)
+      await call(`${bankPath}/memories`, body, signal)
     },
 
     async reflect(query, signal, session): Promise<string> {
       await syncBankConfig(signal)
       const body: Record<string, unknown> = { query }
       withTierFilter(body, session)
-      const data = await request(config, `${bankPath}/reflect`, body, signal)
+      const data = await call(`${bankPath}/reflect`, body, signal)
       return typeof data.text === 'string' && data.text.length > 0 ? data.text : 'the bank returned an empty answer'
     },
 
@@ -150,7 +168,7 @@ export function createMount(config: ResolvedConfig): Mount {
         const tags = recallTags(session).map(encodeURIComponent).join(',')
         path += `&tags=${tags}&tags_match=any`
       }
-      const data = await request(config, path, {}, signal, 'GET')
+      const data = await call(path, {}, signal, 'GET')
       const items = data.items
       if (!Array.isArray(items)) return []
       return items
@@ -171,7 +189,7 @@ export function createMount(config: ResolvedConfig): Mount {
       const tags = session === undefined ? [] : scopeTags(session, scope)
       const body: Record<string, unknown> = { name, content, is_active: true }
       if (tags.length > 0) body.tags = tags
-      await request(config, `${bankPath}/directives`, body, signal)
+      await call(`${bankPath}/directives`, body, signal)
     },
   }
 }
