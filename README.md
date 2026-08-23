@@ -1,11 +1,16 @@
 # dsh-plugin-hindsight-advanced
 
-Hindsight long-term memory for a DeepSeek Harness (dsh) profile — **userland
-only: no DSH source modifications**. The package is a profile **bundle**
-(`package.json` declares `dsh.bundle: { patch: "./cordis.patch.yml" }`): one
-bare-path `dsh plugin add` mounts it into the profile's layer stack, and the
-bundled row gives every web-profile session a `hindsight` tool (retain /
-recall / reflect) and automatic per-turn recall against the configured bank.
+Long-term memory for your DeepSeek Harness (dsh) agent. The agent gets a
+`hindsight` tool to store what it should remember, a recall of what matters
+at the start of every turn, and standing rules that keep applying until you
+change them — with visibility you choose per memory: the whole bank, one
+agent preset, or a single session.
+
+It installs as a plain userland profile **bundle** (`package.json` declares
+`dsh.bundle: { patch: "./cordis.patch.yml" }`) — nothing inside a DSH
+checkout is modified: one `dsh plugin add` mounts it into the profile's
+layer stack, and the bundled row gives each session the tool and the
+automatic recall against the configured bank.
 
 Reference deployment on this machine: web profile, bank `dsh`, Hindsight
 server at `http://127.0.0.1:9177` — the config lives in

@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-hindsight-advanced",
   "version": "0.1.0",
-  "description": "Hindsight long-term memory for a DeepSeek Harness profile: global/preset/session visibility scopes, automatic per-turn recall, and a retain/recall/reflect tool — userland only, no DSH source changes.",
+  "description": "Long-term memory for DeepSeek Harness agents: automatic recall each turn, a retain/recall/reflect tool, standing rules, and visibility you scope to the whole bank, a preset, or a session.",
   "type": "module",
   "main": "hindsight-advanced.ts",
   "exports": {
