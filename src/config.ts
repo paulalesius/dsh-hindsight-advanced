@@ -17,11 +17,6 @@ export interface ResolvedConfig {
   apiKey?: string
   /** The per-turn automatic recall is active. */
   autoContext: boolean
-  /** `true` (default): the model-visible context carries only the LATEST
-   *  automatic snapshot — each new one shadows the previous one on the
-   *  session surface (the preserve-thinking pattern). `false`: every
-   *  turn's snapshot accumulates in the context. */
-  latestOnly: boolean
   /** `true`: retain acknowledges fast and runs fact extraction in the
    *  background; `false` (default): the retain call waits for the bank to
    *  process the memory before returning. */
@@ -168,7 +163,6 @@ export const Config: {
         ...(apiKey !== undefined ? { apiKey } : {}),
         ...(bankConfig !== undefined ? { bankConfig } : {}),
         autoContext: boolFlag(record, 'autoContext', true, issues),
-        latestOnly: boolFlag(record, 'latestOnly', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),
         autoContextTimeoutMs: intFlag(record, 'autoContextTimeoutMs', DEFAULT_AUTO_CONTEXT_TIMEOUT_MS, issues),

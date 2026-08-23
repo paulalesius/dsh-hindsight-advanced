@@ -7,17 +7,19 @@
  * every turn even when the recall matches nothing.
  *
  * Assembly runs BEFORE the pre-step waterfall, so the memory cannot ride
- * the system prompt for its own turn; the snapshot is instead appended to
- * the first step of each turn. The lookup is bounded: a stopped or slow
+ * the system prompt for its own turn; the snapshot instead rides the
+ * pre-step decision, which the loop appends to the first step of each
+ * turn right after the message that triggered the recall — so the
+ * context row lands in the transcript below that message, newest at the
+ * bottom, and never above it. The lookup is bounded: a stopped or slow
  * server costs at most `autoContextTimeoutMs` and the turn proceeds
  * without memory.
  *
- * With `latestOnly` (the default) the snapshot is committed directly to
- * the session surface: each new one SHADOWS the previous one (the same
- * surface-replace mechanism compaction uses), so the model context carries
- * exactly one memory message — the latest recall — while the durable log
- * keeps every snapshot for replay and audit. An empty recall leaves the
- * last snapshot in place; an unchanged one is not re-committed.
+ * The plugin only ever APPENDS a snapshot; it never replaces or erases a
+ * previous turn's snapshot, so the model context accumulates one snapshot
+ * per distinct turn (the durable log keeps every snapshot for replay and
+ * audit). An identical recall is not re-committed (no churn); an empty
+ * recall leaves the existing snapshots in place.
  *
  * @module dsh-plugin-hindsight/autorecall
  */
@@ -84,40 +86,18 @@ export function buildAutoRecall(
     }
     if (hits.length === 0 && rules.length === 0) return decision
     const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
+    // Identical recall: the last snapshot is still accurate and already in
+    // the model context — no churn, no new row.
+    const retained = findRetainedSnapshot(agent.session, pluginName)
+    if (retained !== undefined && retained.text === text) return decision
     const snapshot = createUserMessage({
       content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', sections: [{ name: pluginName, text }] },
     })
-    if (config.latestOnly) {
-      const retained = findRetainedSnapshot(agent.session, pluginName)
-      // Identical recall: the last snapshot is still accurate — no churn.
-      if (retained !== undefined && retained.text === text) return decision
-      // Commit the snapshot to the model-visible surface: a plain append for
-      // the first one, a positional REPLACE for every later one, so each new
-      // snapshot shadows the previous (preserve-thinking). The durable log
-      // keeps every snapshot either way.
-      const intent = retained === undefined
-        ? { surfaceOp: 'append' as const }
-        : {
-            surfaceOp: { op: 'replace' as const, start: retained.seq, end: retained.seq },
-            sourceEventSeqs: [retained.seq],
-          }
-      try {
-        agent.session.append('user/message', snapshot, intent)
-        return decision
-      } catch {
-        // The retained snapshot left the surface between lookup and commit
-        // (e.g. a concurrent compaction): try a plain append instead.
-        try {
-          agent.session.append('user/message', snapshot, { surfaceOp: 'append' })
-          return decision
-        } catch {
-          // The session rejects appends (e.g. already closed): degrade to
-          // letting the loop append the snapshot through the decision.
-        }
-      }
-    }
-    // Cumulative mode: let the loop append one snapshot per turn.
+    // The snapshot rides the pre-step decision, so the loop appends it to
+    // this turn's step right after the triggering message. The plugin only
+    // ever appends: every snapshot stays in the model context, and the
+    // durable log keeps each one for replay and audit.
     return { kind: 'enter', messages: [...decision.messages, snapshot] }
   }
 }

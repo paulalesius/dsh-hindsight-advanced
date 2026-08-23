@@ -152,8 +152,8 @@ because their code defaults are `:8888`/none). `- id: hindsight` with
 bundle row — presets are separate composition trees that cannot see host
 rows — it is a *second mount*: the tools themselves shadow cleanly (scoped
 registration wins over the host one), but each mount registers its own
-per-step auto-recall listener, so both mounts recall and their `latestOnly`
-shadow-replaces clobber each other's snapshot.
+per-step auto-recall listener, so both mounts run their recall and each
+appends its own snapshot to the same session surface.
 
 ## Configuration reference (the row's `config`)
 
@@ -163,7 +163,6 @@ shadow-replaces clobber each other's snapshot.
 | `baseUrl` | `http://127.0.0.1:8888` | Hindsight REST base |
 | `apiKey` | — | optional; `Authorization: Bearer <key>` on every call |
 | `autoContext` | `true` | `false` disables the per-turn automatic recall (the tool stays) |
-| `latestOnly` | `true` | the model sees only the LATEST automatic snapshot: each new one shadows the previous one on the session surface (the preserve-thinking pattern), so memory adds one message to the context instead of one per turn; `false` restores the cumulative per-turn appends |
 | `retainAsync` | `false` | synchronous by default: the retain call waits for the bank to process the memory; `true` acknowledges fast and runs fact extraction in the background |
 | `maxRecallTokens` | `1024` | recall response token budget |
 | `autoContextTimeoutMs` | `2500` | bound for the automatic lookup |
@@ -208,15 +207,13 @@ shadow-replaces clobber each other's snapshot.
   off the PATCH fails and is swallowed, so memory works without the overrides.
 - **automatic recall** — on the first step of each turn the latest user
   message is queried and the hits become a plugin-sourced snapshot message
-  for that step (the `time-context` clock pattern). With `latestOnly` (the
-  default) exactly one snapshot is ever visible to the model: each new one
-  is committed to the session surface by shadowing the previous one (the
-  same surface-replace mechanism compaction uses), so the durable log keeps
-  every snapshot for replay and audit while the context carries only the
-  latest recall — the `preserve-thinking` pattern. An empty recall leaves
-  the last snapshot in place; an unchanged one is not re-committed.
-  `latestOnly: false` restores the cumulative behavior (one appended
-  message per turn). Bounded by `autoContextTimeoutMs`; subagent sessions
+  for that step (the `time-context` clock pattern). The snapshot is only
+  ever APPENDED to the session surface — the plugin never replaces or
+  erases a previous turn's snapshot — so the model context accumulates one
+  snapshot per distinct turn, and the durable log keeps every snapshot for
+  replay and audit. An empty recall leaves the existing snapshots in
+  place; an unchanged one is not re-committed (no churn). Bounded by
+  `autoContextTimeoutMs`; subagent sessions
   are skipped (their task context is owned by the delegating prompt); a
   stopped or slow server never blocks a turn.
 - **subagents** — inherit the parent preset's composition (including this

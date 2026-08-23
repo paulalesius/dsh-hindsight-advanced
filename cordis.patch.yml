@@ -36,12 +36,6 @@
         # hindsight tool stays, the automatic recall goes.
         autoContext: true
 
-        # true — the model sees only the LATEST automatic snapshot (each new one
-        # shadows the previous on the session surface, preserve-thinking pattern):
-        # memory adds one message to the context, not one per turn. false — every
-        # turn's snapshot accumulates.
-        latestOnly: true
-
         # false — retain waits for the bank to process the memory, so the very
         # next recall already sees it. true — fast ack, background extraction.
         retainAsync: false

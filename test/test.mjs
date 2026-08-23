@@ -4,8 +4,9 @@
 // OUTER isolation; inside a bank, the three visibility tiers), tool
 // execution (retain / recall / reflect, with tier tags, plus standing
 // directives: kind: directive, tier-scoped listing, rules-on-empty-recall),
-// and the automatic pre-step recall — including the latest-only snapshot
-// replacement (the preserve-thinking pattern).
+// and the automatic pre-step recall: snapshot rows ride the pre-step
+// decision (landing AFTER the triggering message) and are only ever
+// appended — the plugin never replaces or erases a previous snapshot.
 import assert from 'node:assert/strict'
 import { start, state } from './stub-server.mjs'
 
@@ -32,7 +33,6 @@ assert.deepEqual(standard.value, {
   bank: 'hermes',
   baseUrl: 'http://127.0.0.1:8888',
   autoContext: true,
-  latestOnly: true,
   retainAsync: false,
   maxRecallTokens: 1024,
   autoContextTimeoutMs: 2500,
@@ -48,13 +48,10 @@ assert.equal(globalMount.value.retainScope, 'global')
 const badScope = validate({ bank: 'x', retainScope: 'everywhere' })
 assert.ok('issues' in badScope && badScope.issues.some(issue => issue.path?.[0] === 'retainScope'), JSON.stringify(badScope))
 
-// latestOnly and retainAsync: opt-ins + validation
-const asyncMount = validate({ bank: 'x', retainAsync: true, latestOnly: false })
+// retainAsync: opt-in + validation
+const asyncMount = validate({ bank: 'x', retainAsync: true })
 assert.ok('value' in asyncMount, JSON.stringify(asyncMount))
 assert.equal(asyncMount.value.retainAsync, true)
-assert.equal(asyncMount.value.latestOnly, false)
-const badLatest = validate({ bank: 'x', latestOnly: 'yes' })
-assert.ok('issues' in badLatest && badLatest.issues.some(issue => issue.path?.[0] === 'latestOnly'))
 
 // bank is required
 const none = validate({})
@@ -137,14 +134,23 @@ const isSnapshot = (event) =>
   && event.data.source.form === 'snapshot'
 const snapshots = (session) => session.events.filter(isSnapshot)
 const onSurface = (session, event) => session.surface.nodes.includes(event.seq)
-const surfaceSnapshots = (session) => snapshots(session).filter(event => onSurface(session, event))
 
-// Run one pre-step the way the loop does: the listener may commit the
-// snapshot itself (latest-only) or hand it back in the decision, which the
-// loop appends with a plain append.
+// Mirrors deriveEventMessage over the stand-in's surface: each surface
+// event derives to its message.
+const deriveMessages = (session) => session.surface.nodes
+  .map(seq => session.events[seq - 1])
+  .map(event => event.data)
+const derivedSnapshots = (session) => deriveMessages(session).filter(message =>
+  message.source?.kind === 'plugin' && message.source.plugin === 'hindsight' && message.source.form === 'snapshot',
+)
+
+// Run one pre-step the way the loop does: the loop appends the decision's
+// messages with a plain append — the snapshot rides the decision, landing
+// after the triggering message.
 async function runStep(listener, a, step, messages) {
+  a.turn = (a.turn ?? 0) + 1
   const decision = await listener(
-    { agent: a, messages, step, signal: baseSignal },
+    { agent: a, messages, turn: a.turn, step, signal: baseSignal },
     async () => ({ kind: 'enter', messages }),
   )
   if (decision.kind === 'enter') {
@@ -210,16 +216,17 @@ async function runStep(listener, a, step, messages) {
   await assert.rejects(() => tool.execute({ action: 'recall' }, { signal: baseSignal }), /query/)
   console.log('ok  mount A: missing required args are rejected')
 
-  // ── automatic recall, latest-only (the default) ───────────────────────────
-  // Turn 1: the snapshot is committed by the plugin itself — it does NOT ride
-  // the decision, because the decision's messages are always plain appends.
+  // ── automatic recall (append-only: never replaces a prior turn) ───────────────────────────
+  // Turn 1: the snapshot rides the pre-step decision, so the loop appends it
+  // right after the message that triggered the recall — below it in the log.
   const d1 = await runStep(listener, agent, 1, [userMsg('which editor does the user prefer?')])
   assert.equal(d1.kind, 'enter')
-  assert.equal(d1.messages.length, 1, 'latest-only: the snapshot does not ride the decision')
+  assert.equal(d1.messages.length, 2, 'the snapshot rides the decision')
   const snaps1 = snapshots(agent.session)
   assert.equal(snaps1.length, 1)
   assert.ok(onSurface(agent.session, snaps1[0]), 'turn 1 snapshot is on the model-visible surface')
-  assert.equal(snaps1[0].surfaceOp, 'append', 'first snapshot is a plain append')
+  assert.equal(snaps1[0].surfaceOp, 'append', 'the loop appends the snapshot as a plain append')
+  assert.equal(snaps1[0].seq, agent.session.events.at(-2).seq + 1, 'the row lands right after the triggering message')
   assert.match(snaps1[0].data.content[0].text, /Relevant memories from the Hindsight bank "hermes"/)
   assert.match(snaps1[0].data.content[0].text, /prefers tabs over spaces/)
   const autoReq = state.requests.filter(request =>
@@ -230,66 +237,51 @@ async function runStep(listener, a, step, messages) {
   const autoRulesReq = state.requests.filter(request => request.path === '/v1/default/banks/hermes/directives').at(-1)
   assert.ok(autoRulesReq, 'the auto-lookup also listed standing rules')
   assert.ok(autoRulesReq.query.includes('active_only=true'), 'only active rules are listed')
-  console.log('ok  mount A: auto-recall commits one snapshot to the surface')
+  assert.equal(deriveMessages(agent.session).length, 2, 'model context: the message + its snapshot')
+  console.log('ok  mount A: auto-recall appends the snapshot after the message that triggered it')
 
-  // Turn 2, different query: the new snapshot REPLACES the old one. The
-  // durable log keeps both; the model-visible surface keeps only the newest.
+  // Turn 2, different query: the new snapshot rides the decision again and is
+  // APPENDED — the previous snapshot is never replaced or erased; the model
+  // context accumulates both.
   await tool.execute({ action: 'retain', text: 'The demo build runs on Node 22.' }, { signal: baseSignal })
   const d2 = await runStep(listener, agent, 1, [userMsg('which node runtime does the demo build use?')])
-  assert.equal(d2.messages.length, 1)
+  assert.equal(d2.messages.length, 2, 'the new snapshot rides the decision')
   const snaps2 = snapshots(agent.session)
   assert.equal(snaps2.length, 2, 'durable log keeps every snapshot')
-  const visible2 = surfaceSnapshots(agent.session)
-  assert.equal(visible2.length, 1, 'the model sees exactly one snapshot — the latest')
-  assert.equal(visible2[0].seq, snaps2[1].seq)
-  assert.equal(visible2[0].surfaceOp.op, 'replace')
-  assert.deepEqual(visible2[0].sourceEventSeqs, [snaps2[0].seq], 'the replace shadows the old snapshot')
-  assert.equal(onSurface(agent.session, snaps2[0]), false, 'the old snapshot is shadowed')
-  assert.match(visible2[0].data.content[0].text, /Node 22/)
-  assert.doesNotMatch(visible2[0].data.content[0].text, /tabs over spaces/)
-  console.log('ok  mount A: turn 2 snapshot replaces turn 1 on the surface (preserve-thinking)')
+  assert.equal(snaps2[0].surfaceOp, 'append', 'the old snapshot was appended, never replaced')
+  assert.ok(onSurface(agent.session, snaps2[0]), 'the old snapshot stays on the model surface')
+  assert.ok(onSurface(agent.session, snaps2[1]), 'the new snapshot is on the model surface')
+  const modelSnaps2 = derivedSnapshots(agent.session)
+  assert.equal(modelSnaps2.length, 2, 'the model context accumulates every recall')
+  assert.match(modelSnaps2[1].content[0].text, /Node 22/, 'the newest snapshot is the latest recall')
+  console.log('ok  mount A: turn 2 appends a new snapshot — the previous one is never erased')
 
-  // Turn 3, empty recall: the last snapshot stays in place, nothing new.
+  // Turn 3, empty recall: the existing snapshots stay in place, nothing new.
   const d3 = await runStep(listener, agent, 1, [userMsg('tell me a completely unrelated story about zzzzzz')])
-  assert.equal(d3.messages.length, 1)
+  assert.equal(d3.messages.length, 1, 'an empty recall rides no snapshot')
   assert.equal(snapshots(agent.session).length, 2, 'an empty recall appends no snapshot')
-  assert.equal(surfaceSnapshots(agent.session)[0].seq, snaps2[1].seq, 'the last snapshot remains visible')
-  console.log('ok  mount A: an empty recall leaves the last snapshot in place')
+  assert.match(derivedSnapshots(agent.session).at(-1).content[0].text, /Node 22/, 'the last snapshot remains in context')
+  console.log('ok  mount A: an empty recall leaves the existing snapshots in place')
 
-  // Unchanged snapshot: identical hits are not re-committed (no churn).
+  // Unchanged snapshot: identical hits are not re-committed (no churn, no
+  // duplicate row) — the still-accurate snapshot stays where it is.
   const snapsUnchanged = snapshots(agent.session).length
-  await runStep(listener, agent, 1, [userMsg('which node runtime does the demo build use?')])
+  const d4unchanged = await runStep(listener, agent, 1, [userMsg('which node runtime does the demo build use?')])
+  assert.equal(d4unchanged.messages.length, 1, 'an unchanged recall appends no row')
   assert.equal(snapshots(agent.session).length, snapsUnchanged, 'an unchanged snapshot is not re-committed')
-  assert.equal(surfaceSnapshots(agent.session).length, 1)
   console.log('ok  mount A: an unchanged snapshot is not re-committed')
 
   // step 2 and subagents pass through unchanged, without committing snapshots
-  const snapsPassThrough = snapshots(agent.session).length
   const d4 = await runStep(listener, agent, 2, [userMsg('steering mid-turn')])
   assert.equal(d4.messages.length, 1)
-  assert.equal(snapshots(agent.session).length, snapsPassThrough, 'step 2 commits no snapshot')
+  assert.equal(snapshots(agent.session).length, snapsUnchanged, 'step 2 commits no snapshot')
   const d5 = await runStep(listener, subagent, 1, [userMsg('subagent work')])
   assert.equal(d5.messages.length, 1)
   assert.equal(snapshots(subagent.session).length, 0, 'subagents get no snapshot')
   // rejections pass through untouched
-  const reject = await listener({ agent, messages: [userMsg('x')], step: 1, signal: baseSignal }, async () => ({ kind: 'reject' }))
+  const reject = await listener({ agent, messages: [userMsg('x')], turn: 9, step: 1, signal: baseSignal }, async () => ({ kind: 'reject' }))
   assert.equal(reject.kind, 'reject')
   console.log('ok  mount A: step 2, subagents, and rejections pass through')
-
-  // ── cumulative mode: latestOnly: false restores per-turn appends ──────────
-  const ctxLegacy = makeCtx()
-  plugin.apply(ctxLegacy, { ...standard.value, latestOnly: false, baseUrl: stubUrl })
-  const legacyListener = ctxLegacy.listeners[0].fn
-  const legacyAgent = { session: makeSession('sess-legacy') }
-  const legacyClaim = [userMsg('which editor does the user prefer?')]
-  const dLegacy = await legacyListener(
-    { agent: legacyAgent, messages: legacyClaim, step: 1, signal: baseSignal },
-    async () => ({ kind: 'enter', messages: legacyClaim }),
-  )
-  assert.equal(dLegacy.messages.length, 2, 'cumulative mode: the snapshot rides the decision')
-  assert.match(dLegacy.messages[1].content[0].text, /prefers tabs over spaces/)
-  assert.equal(legacyAgent.session.events.length, 0, 'cumulative mode: the plugin never commits to the session')
-  console.log('ok  mount A: latestOnly: false restores the cumulative per-turn appends')
 }
 
 // ── mount B: bank dsh-code — the banks themselves are the isolation ─────────

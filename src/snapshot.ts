@@ -2,7 +2,7 @@
  * The automatic-recall surface logic: derive the recall query from the
  * step's messages, render hits as the model-facing memory text, and find
  * this mount's most recent snapshot still on the model-visible surface
- * (the `latestOnly` / preserve-thinking mechanism).
+ * (used to skip re-committing an unchanged recall).
  *
  * @module dsh-plugin-hindsight/snapshot
  */

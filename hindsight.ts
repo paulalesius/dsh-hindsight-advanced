@@ -53,13 +53,11 @@
  *   and subagent sessions are skipped, so a slow or stopped Hindsight server
  *   never blocks a turn.
  *
- *   With `latestOnly` (default `true`) exactly one snapshot is ever visible
- *   to the model: each turn's snapshot is appended to the session surface by
- *   REPLACING the mount's previous snapshot, so the model context carries
- *   only the latest recall (the `preserve-thinking` pattern), while the
- *   durable log keeps every snapshot for replay and audit. An empty recall
- *   leaves the last snapshot in place. `latestOnly: false` restores the
- *   cumulative behavior (one appended message per turn).
+ *   The snapshot is only ever appended — the plugin never replaces or
+ *   erases a previous turn's snapshot — so the model context accumulates one
+ *   snapshot per distinct turn, while the durable log keeps every snapshot
+ *   for replay and audit. An identical recall is not re-committed (no
+ *   churn); an empty recall leaves the existing snapshots in place.
  *
  * Visibility tiers (the plugin's tag model — the model never sees tags):
  * the plugin tags every stored memory with at most ONE tier's tag, and the
@@ -89,9 +87,6 @@
  * - `apiKey` — optional; sent as `Authorization: Bearer <key>` on every call.
  * - `autoContext` — default `true`; `false` disables the per-turn recall
  *   (the tool stays available).
- * - `latestOnly` — default `true`; the model sees only the LATEST automatic
- *   snapshot (each new one replaces the previous on the model-visible
- *   surface). `false` keeps every turn's snapshot in context (cumulative).
  * - `retainAsync` — default `false` (synchronous: the retain call waits for
  *   the bank to process the memory); `true` acknowledges fast and runs fact
  *   extraction in the background.
