@@ -75,9 +75,11 @@ Then restart `dsh web` once — the bundle layer joins the boot (still inert:
 the row is disabled until you enable it, see **Enable and configure**). The
 module's own runtime imports (`@deepseek-ai/dsh-llm`, `@deepseek-ai/dsh-tools`)
 resolve by Node's upward `node_modules` walk **from the plugin file's
-location**: the source directory carries a `node_modules` symlink to the DSH
-checkout's `apps/cli/node_modules`, and the bare name also resolves from the
-profile directory once linked.
+location**: the source directory carries a machine-local `node_modules`
+symlink to the DSH checkout's `apps/cli/node_modules` (gitignored; recreate
+with `ln -s <dsh-checkout>/apps/cli/node_modules node_modules` after a fresh
+checkout), and the bare name also resolves from the profile directory once
+linked.
 
 Day-to-day (symlink install):
 

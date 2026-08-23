@@ -121,10 +121,12 @@ node test/verify-preset.mjs
 HINDSIGHT_API_KEY=<key> node --import ./register.mjs live.mjs
 ```
 
-- `node_modules` here is a **symlink** into the DSH checkout's
-  `apps/cli/node_modules` — do not `npm install` in this repo and do not
-  add runtime dependencies without first deleting an equivalent amount of
-  code.
+- `node_modules` here is a **machine-local symlink** into the DSH
+  checkout's `apps/cli/node_modules` — it is gitignored, not part of the
+  repo. A fresh checkout recreates it once
+  (`ln -s <dsh-checkout>/apps/cli/node_modules node_modules`) and then do
+  not `npm install` in this repo and do not add runtime dependencies
+  without first deleting an equivalent amount of code.
 - Edits to the entry or `src/` take effect after a `dsh web` restart (the
   node half loads at session start); config edits to `cordis.patch.yml`
   likewise.

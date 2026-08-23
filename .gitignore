@@ -1,0 +1,3 @@
+# The node_modules entry is a machine-local symlink into the DSH
+# checkout's apps/cli/node_modules — recreate it, never check it in.
+node_modules
