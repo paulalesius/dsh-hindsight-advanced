@@ -2,7 +2,7 @@
  * The mount's configuration: the Standard-Schema v1 validator for the row's
  * `config` block and the resolved shape it produces.
  *
- * @module dsh-plugin-hindsight/config
+ * @module dsh-plugin-hindsight-advanced/config
  */
 
 import { MEMORY_SCOPES, type MemoryScope } from './tiers.ts'

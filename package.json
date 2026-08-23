@@ -1,11 +1,11 @@
 {
-  "name": "dsh-plugin-hindsight",
+  "name": "dsh-plugin-hindsight-advanced",
   "version": "0.1.0",
   "description": "Hindsight long-term memory for a DeepSeek Harness profile: per-preset banks, auto-recall, and a retain/recall/reflect tool — userland only, no DSH source changes.",
   "type": "module",
-  "main": "hindsight.ts",
+  "main": "hindsight-advanced.ts",
   "exports": {
-    ".": "./hindsight.ts"
+    ".": "./hindsight-advanced.ts"
   },
   "dsh": {
     "bundle": {

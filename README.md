@@ -1,4 +1,4 @@
-# dsh-plugin-hindsight
+# dsh-plugin-hindsight-advanced
 
 Hindsight long-term memory for a DeepSeek Harness (dsh) profile — **userland
 only: no DSH source modifications**. The package is a profile **bundle**
@@ -40,7 +40,7 @@ see **Enable and configure**):
   for standard, `dsh-code` for code" is two preset rows. Presets without
   the row are mount-less: no tool, no auto-recall.
 
-The preset row uses the bare `name: dsh-plugin-hindsight` — the preset
+The preset row uses the bare `name: dsh-plugin-hindsight-advanced` — the preset
 mount re-anchors bare specifiers to the host composition, so the profile's
 `node_modules` copy resolves. The plugin never reads the session's preset;
 isolation is separate banks either way.
@@ -49,13 +49,13 @@ isolation is separate banks either way.
 
 | file | role |
 | --- | --- |
-| `hindsight.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + pre-step listener |
+| `hindsight-advanced.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + pre-step listener |
 | `src/types.ts` | shared shapes (`RecallHit`, `RecallOptions`) |
 | `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
 | `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
 | `src/client.ts` | the REST transport: one bounded call, one clean bounded error shape |
 | `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`listDirectives`/`retainDirective` operations — the extension point for new Hindsight operations |
-| `src/snapshot.ts` | auto-recall surface logic: query derivation, hit + standing-rules rendering, latest-only snapshot lookup |
+| `src/snapshot.ts` | auto-recall surface logic: query derivation, hit + standing-rules rendering, identical-recall snapshot lookup |
 | `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
 | `src/autorecall.ts` | the `agent/pre-step` listener (bounded lookup + surface commit) |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle (the install step below) |
@@ -100,7 +100,7 @@ Day-to-day (symlink install):
 
 - edits to the plugin source (the entry or `src/`) → restart `dsh web` (the node half loads at session start)
 - config changes → edit `cordis.patch.yml` in place, restart
-- uninstall → `dsh plugin --profile web remove dsh-plugin-hindsight` (the
+- uninstall → `dsh plugin --profile web remove dsh-plugin-hindsight-advanced` (the
   bundle entry is dropped automatically) + restart
 
 ## Enable and configure (per user, declarative)
@@ -131,7 +131,7 @@ leaving the bundle row disabled:
 
 ```yaml
 - id: hindsight
-  name: dsh-plugin-hindsight
+  name: dsh-plugin-hindsight-advanced
   config:
     bank: my-bank
     baseUrl: http://127.0.0.1:9177
@@ -226,7 +226,7 @@ appends its own snapshot to the same session surface.
 
 ## Uninstall
 
-`dsh plugin --profile web remove dsh-plugin-hindsight` (the bundle entry is
+`dsh plugin --profile web remove dsh-plugin-hindsight-advanced` (the bundle entry is
 dropped automatically) + restart `dsh web`. For a per-preset row instead:
 remove that row from the preset's `agent.cordis.yml`; new sessions on that
 preset lose the tool. Either way your banks and memories are untouched (they

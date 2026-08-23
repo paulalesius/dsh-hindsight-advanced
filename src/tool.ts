@@ -4,7 +4,7 @@
  * The description IS the retention policy: it tells the model what is
  * durable (and therefore worth a `retain`) and what is not.
  *
- * @module dsh-plugin-hindsight/tool
+ * @module dsh-plugin-hindsight-advanced/tool
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'

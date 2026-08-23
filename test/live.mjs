@@ -14,10 +14,10 @@ import assert from 'node:assert/strict'
 const BASE = 'http://127.0.0.1:9177'
 const API_KEY = 'local-key'
 const BANK = 'dsh-plugin-smoke'
-const PLUGIN = 'file:///home/noname/deepseek-harness/dsh-plugins/hindsight/hindsight.ts'
+const PLUGIN = 'file:///home/noname/deepseek-harness/dsh-plugins/hindsight-advanced/hindsight-advanced.ts'
 
 const plugin = await import(PLUGIN)
-assert.equal(plugin.name, 'hindsight')
+assert.equal(plugin.name, 'hindsight-advanced')
 
 // ── same minimal context shape as test.mjs ──────────────────────────────────
 function makeCtx() {

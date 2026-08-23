@@ -1,7 +1,7 @@
 /**
  * Shared shapes used across the hindsight plugin's modules.
  *
- * @module dsh-plugin-hindsight/types
+ * @module dsh-plugin-hindsight-advanced/types
  */
 
 /** One recall hit, as surfaced to the model. */

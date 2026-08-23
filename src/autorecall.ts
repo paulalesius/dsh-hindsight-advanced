@@ -21,7 +21,7 @@
  * audit). An identical recall is not re-committed (no churn); an empty
  * recall leaves the existing snapshots in place.
  *
- * @module dsh-plugin-hindsight/autorecall
+ * @module dsh-plugin-hindsight-advanced/autorecall
  */
 
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'

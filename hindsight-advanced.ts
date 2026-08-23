@@ -10,13 +10,13 @@
  *
  *   # ~/.dsh/.agent-presets/standard/agent.cordis.yml
  *   - id: hindsight
- *     name: ./hindsight.ts
+ *     name: ./hindsight-advanced.ts
  *     config:
  *       bank: hermes
  *
  *   # ~/.dsh/.agent-presets/code/agent.cordis.yml
  *   - id: hindsight
- *     name: ./hindsight.ts
+ *     name: ./hindsight-advanced.ts
  *     config:
  *       bank: dsh-code
  *
@@ -116,7 +116,7 @@
  * logic), `tool` (the model-facing tool), `autorecall` (the pre-step
  * listener).
  *
- * @module dsh-plugin-hindsight
+ * @module dsh-plugin-hindsight-advanced
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -127,7 +127,7 @@ import { Config, type ResolvedConfig } from './src/config.ts'
 import { buildTool } from './src/tool.ts'
 
 /** Cordis plugin name for loader diagnostics. */
-export const name = 'hindsight'
+export const name = 'hindsight-advanced'
 
 /** Services the plugin requires: tool registration only. */
 export const inject = ['tools']

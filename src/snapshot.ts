@@ -4,7 +4,7 @@
  * this mount's most recent snapshot still on the model-visible surface
  * (used to skip re-committing an unchanged recall).
  *
- * @module dsh-plugin-hindsight/snapshot
+ * @module dsh-plugin-hindsight-advanced/snapshot
  */
 
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'

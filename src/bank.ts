@@ -8,7 +8,7 @@
  * operations (mental models, directives, consolidation, …) become new
  * methods on the mount here.
  *
- * @module dsh-plugin-hindsight/bank
+ * @module dsh-plugin-hindsight-advanced/bank
  */
 
 import type { Session } from '@deepseek-ai/dsh-session'

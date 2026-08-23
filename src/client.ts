@@ -3,7 +3,7 @@
  * failure — connect, read, status — surfaced as the plugin's clean,
  * bounded error shape.
  *
- * @module dsh-plugin-hindsight/client
+ * @module dsh-plugin-hindsight-advanced/client
  */
 
 import type { ResolvedConfig } from './config.ts'

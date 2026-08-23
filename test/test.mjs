@@ -13,10 +13,10 @@ import { start, state } from './stub-server.mjs'
 const stub = await start(18888)
 const stubUrl = `http://127.0.0.1:${stub.port}`
 
-const plugin = await import('../hindsight.ts')
+const plugin = await import('../hindsight-advanced.ts')
 
 // ── export shape: Cordis Plugin.Object ──────────────────────────────────────
-assert.equal(plugin.name, 'hindsight')
+assert.equal(plugin.name, 'hindsight-advanced')
 assert.deepEqual(plugin.inject, ['tools'])
 assert.equal(typeof plugin.apply, 'function')
 assert.equal(plugin.Config['~standard'].version, 1)
@@ -130,7 +130,7 @@ const userMsg = (text) => ({ id: `u${Math.random()}`, role: 'user', content: [{ 
 const isSnapshot = (event) =>
   event.type === 'user/message'
   && event.data.source?.kind === 'plugin'
-  && event.data.source.plugin === 'hindsight'
+  && event.data.source.plugin === 'hindsight-advanced'
   && event.data.source.form === 'snapshot'
 const snapshots = (session) => session.events.filter(isSnapshot)
 const onSurface = (session, event) => session.surface.nodes.includes(event.seq)
@@ -141,7 +141,7 @@ const deriveMessages = (session) => session.surface.nodes
   .map(seq => session.events[seq - 1])
   .map(event => event.data)
 const derivedSnapshots = (session) => deriveMessages(session).filter(message =>
-  message.source?.kind === 'plugin' && message.source.plugin === 'hindsight' && message.source.form === 'snapshot',
+  message.source?.kind === 'plugin' && message.source.plugin === 'hindsight-advanced' && message.source.form === 'snapshot',
 )
 
 // Run one pre-step the way the loop does: the loop appends the decision's

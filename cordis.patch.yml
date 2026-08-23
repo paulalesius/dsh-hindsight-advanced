@@ -1,10 +1,10 @@
-# dsh-plugin-hindsight bundle patch: the profile layer that mounts this
+# dsh-plugin-hindsight-advanced bundle patch: the profile layer that mounts this
 # package. `dsh plugin add` joins it into `dsh.profile.bundles` (the CLI
 # reconciles the layer list against installed state).
 #
 # The row ships DISABLED — the install is inert. Two opt-in scopes (README):
 # - per preset: a row in the preset's own agent.cordis.yml
-#   (`name: dsh-plugin-hindsight`, its own `config` — that preset's bank).
+#   (`name: dsh-plugin-hindsight-advanced`, its own `config` — that preset's bank).
 #   Presets without the row are mount-less: no tool, no auto-recall.
 # - for every preset: the user's profile patch layer
 #   (~/.dsh/profiles/web/cordis.patch.yml) enables this row:
@@ -17,7 +17,7 @@
 # per-step auto-recall listeners then collide (see the README).
 - insert:
     - id: hindsight
-      name: dsh-plugin-hindsight
+      name: dsh-plugin-hindsight-advanced
       disabled: true
       config:
         # REQUIRED — the only key with no default. Bank id (case-sensitive; the

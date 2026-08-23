@@ -21,7 +21,7 @@
  * tier, and every untagged (global) memory — and no memory tagged for
  * another session or another preset.
  *
- * @module dsh-plugin-hindsight/tiers
+ * @module dsh-plugin-hindsight-advanced/tiers
  */
 
 import type { Session } from '@deepseek-ai/dsh-session'
