@@ -23,7 +23,8 @@ if (API_KEY === undefined || API_KEY.length === 0) {
   process.exit(1)
 }
 const BANK = 'dsh-plugin-smoke'
-const PLUGIN = 'file:///home/noname/deepseek-harness/dsh-plugins/hindsight-advanced/hindsight-advanced.ts'
+// The deployable file, resolved relative to this test — no absolute path.
+const PLUGIN = new URL('../hindsight-advanced.ts', import.meta.url).href
 
 const plugin = await import(PLUGIN)
 assert.equal(plugin.name, 'hindsight-advanced')
@@ -92,11 +93,11 @@ const listUnits = async params => {
 
 // ── retain (synchronous): the default scope is the session's preset tier ────
 {
-  const out = await run({ action: 'retain', text: 'The live-demo project is built with pnpm and deploys to the box at 192.168.8.20.' }, { agent: alice, signal })
+  const out = await run({ action: 'retain', text: 'The live-demo project is built with pnpm and deploys to the staging box.' }, { agent: alice, signal })
   assert.equal(out.action, 'retain')
   assert.equal(out.bank, BANK)
   const units = (await listUnits({ tags: 'preset:smoke-preset', tags_match: 'all_strict' }))
-    .filter(unit => /live-demo|pnpm|192\.168\.8\.20/.test(String(unit.text ?? '')))
+    .filter(unit => /live-demo|pnpm|staging box/.test(String(unit.text ?? '')))
   assert.ok(units.length > 0, `no unit tagged preset:smoke-preset carrying the retain content: ${JSON.stringify(await listUnits({}))}`)
   console.log('ok  retain (default scope) → unit stored tagged preset:smoke-preset (verified server-side)')
 }

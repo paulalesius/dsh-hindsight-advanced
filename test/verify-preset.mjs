@@ -5,8 +5,12 @@
 // 4. run the row's `config` through the plugin's own Standard Schema validator.
 import { load, JSON_SCHEMA, Type } from 'js-yaml'
 import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
-const yml = process.argv[2] ?? '/home/noname/.dsh/.agent-presets/custom/agent.cordis.yml'
+// Default: this profile's custom preset row (pass a path as argv[2] to
+// verify a different preset).
+const yml = process.argv[2] ?? join(homedir(), '.dsh', '.agent-presets', 'custom', 'agent.cordis.yml')
 
 const JsExpr = new Type('tag:yaml.org,2002:js', {
   kind: 'scalar',

@@ -104,8 +104,10 @@ tree — preserve them when you change anything:
 All commands run from the repo root (the plugin directory) unless noted:
 
 ```bash
-# type-check (strict; the toolchain comes from the DSH checkout)
-/src/misc/harness/deepseek-harness/node_modules/.bin/tsc --noEmit --strict \
+# type-check (strict; tsc is resolved through the machine-local
+# node_modules symlink into the DSH checkout — no absolute path here)
+TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
+"$TSC" --noEmit --strict \
   --noUnusedLocals --noUnusedParameters --noFallthroughCasesInSwitch \
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
