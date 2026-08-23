@@ -246,7 +246,18 @@ async function runStep(listener, a, step, messages) {
   assert.equal(recallReq.path, '/v1/default/banks/hermes/memories/recall')
   assert.equal(recallReq.body.max_tokens, 1024)
   assert.equal(recallReq.body.tags, undefined, 'no agent context: no tier filter')
+  assert.deepEqual(recallReq.body.types, ['world', 'experience', 'observation'], 'default: all three layers')
+  assert.equal(recallReq.body.prefer_observations, true, 'default: observations supersede their raw facts')
   console.log('ok  mount A: recall returns the stored memory (no agent → whole bank visible)')
+
+  // consolidation mode — the recall body requests every layer with
+  // prefer_observations, so a fact + its observation collapse to the
+  // observation; an explicit model types restriction wins over the default
+  await tool.execute({ action: 'recall', query: 'which editor does the user prefer?', types: ['world'] }, { signal: baseSignal })
+  const constrainedReq = state.requests.at(-1)
+  assert.deepEqual(constrainedReq.body.types, ['world'], 'explicit model types restriction wins')
+  assert.equal(constrainedReq.body.prefer_observations, true, 'still sent; a no-op without an observation type')
+  console.log('ok  mount A: recall requests consolidation mode (all three layers, prefer_observations)')
 
   // reflect — synthesized answer
   const reflectResult = await tool.execute({ action: 'reflect', query: 'what do we know about their editor?' }, { signal: baseSignal })
@@ -438,6 +449,8 @@ async function runStep(listener, a, step, messages) {
   const recallReq = state.requests.at(-1)
   assert.deepEqual(recallReq.body.tags, ['session:sess-a', 'preset:standard'])
   assert.equal(recallReq.body.tags_match, 'any')
+  assert.deepEqual(recallReq.body.types, ['world', 'experience', 'observation'], 'tier filter rides with consolidation mode')
+  assert.equal(recallReq.body.prefer_observations, true)
 
   // visibility matrix: own + preset + global are visible; another session's
   // or another preset's tier is not
@@ -486,6 +499,8 @@ async function runStep(listener, a, step, messages) {
   const autoReq = state.requests[before]
   assert.deepEqual(autoReq.body.tags, ['session:sess-a', 'preset:standard'])
   assert.equal(autoReq.body.tags_match, 'any')
+  assert.deepEqual(autoReq.body.types, ['world', 'experience', 'observation'], 'auto-recall also requests consolidation mode')
+  assert.equal(autoReq.body.prefer_observations, true)
   assert.match(snapshots(alice.session)[0].data.content[0].text, /Fridays/)
   console.log('ok  mount E: the automatic pre-step recall is tier-scoped too')
 }

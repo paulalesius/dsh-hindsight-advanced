@@ -94,7 +94,7 @@ tree — preserve them when you change anything:
 | `src/autorecall.ts` | the `agent/pre-step` listener (bounded lookup + surface commit) |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 28 checks, six mounts — the fifth covers the visibility tiers, the sixth the standing directives) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 29 checks, six mounts — the fifth covers the visibility tiers, the sixth the standing directives) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |
@@ -112,7 +112,7 @@ TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
 
-# the stub suite (28 checks)
+# the stub suite (29 checks)
 cd test && node --import ./register.mjs test.mjs
 
 # preset-mount verification (the custom agent preset row)

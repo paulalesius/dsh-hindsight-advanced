@@ -117,11 +117,21 @@ export function createMount(
 
     async recall(query, signal, session, options): Promise<RecallHit[]> {
       await syncBankConfig(signal)
+      // Consolidation mode: recall all three layers and let every observation
+      // supersede the raw facts it was consolidated from, so the bank's
+      // deduplicated beliefs appear once (not as fact + observation pairs) and
+      // the freed slots backfill with next-best facts. When the model restricts
+      // `types` explicitly, that wins — `prefer_observations` then no-ops
+      // server-side (it only acts when an observation and a raw type are both
+      // requested) and stays sent harmlessly.
       const body: Record<string, unknown> = {
         query,
         max_tokens: options?.maxTokens ?? config.maxRecallTokens,
+        types: options?.types !== undefined && options.types.length > 0
+          ? [...options.types]
+          : ['world', 'experience', 'observation'],
+        prefer_observations: true,
       }
-      if (options?.types !== undefined && options.types.length > 0) body.types = [...options.types]
       withTierFilter(body, session)
       const data = await call(`${bankPath}/memories/recall`, body, signal)
       const results = data.results
