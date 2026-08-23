@@ -26,6 +26,8 @@ rendered in their own "Standing rules" section of the per-turn snapshot — so
 a stored rule reaches the model every turn even when the recall matches
 nothing. `reflect` calls apply matching directives server-side as well.
 
+<p align="center"><img src="./misc/banner.jpg" alt="dsh-plugin-hindsight-advanced banner"/></p>
+
 ## Scope: host-plane (the bundle), or per-preset (a preset row)
 
 **The install is inert** — the bundle row ships `disabled: true`. Opting in
@@ -44,25 +46,6 @@ The preset row uses the bare `name: dsh-plugin-hindsight-advanced` — the prese
 mount re-anchors bare specifiers to the host composition, so the profile's
 `node_modules` copy resolves. The plugin never reads the session's preset;
 isolation is separate banks either way.
-
-## Layout
-
-| file | role |
-| --- | --- |
-| `hindsight-advanced.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + pre-step listener |
-| `src/types.ts` | shared shapes (`RecallHit`, `RecallOptions`) |
-| `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
-| `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
-| `src/client.ts` | the REST transport: one bounded call, one clean bounded error shape |
-| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`listDirectives`/`retainDirective` operations — the extension point for new Hindsight operations |
-| `src/snapshot.ts` | auto-recall surface logic: query derivation, hit + standing-rules rendering, identical-recall snapshot lookup |
-| `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
-| `src/autorecall.ts` | the `agent/pre-step` listener (bounded lookup + surface commit) |
-| `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle (the install step below) |
-| `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the reference below) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 28 checks, six mounts — the fifth covers the visibility tiers, the sixth the standing directives) |
-| `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
-| `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 
 ## Install (web profile)
 
@@ -170,13 +153,28 @@ appends its own snapshot to the same session surface.
 | `retainScope` | `preset` | the visibility tier `retain` uses when the model omits the `scope` parameter: `global` (every session of the bank), `preset` (this agent preset's sessions), `session` (this session only) |
 | `bankConfig` | — | optional; a flat object of Hindsight per-bank config overrides — the **server-side extraction policy** (e.g. `retain_mission`, the "what to retain" instruction injected into the bank's fact-extraction prompt); applied once before the first memory operation, see Behavior |
 
-**Where the key lives** — `apiKeyRef` is only a name; the value is resolved
-on every call, most trusted first: the process environment, then
-`~/.dsh/.credentials.yaml` (the `refs:` section — a 0600 store, e.g.
-`refs: / HINDSIGHT_API_KEY: <token>`), then the project and user `.env`
-files. Because resolution is per call, editing the store (or exporting the
-env var) takes effect on the next operation — no restart, no config edit,
-and the secret appears nowhere in a file that gets committed or shipped.
+### Adding the key
+
+`apiKeyRef` is only a name — the value is resolved on every call, most
+trusted first: the process environment, then
+`~/.dsh/.credentials.yaml` (the `refs:` section, a 0600 store), then the
+project and user `.env` files. The usual way is to add one line to
+`~/.dsh/.credentials.yaml` — **alongside any existing refs** (e.g. the LLM
+provider's `DEFAULT_API_KEY`), never replacing them:
+
+```yaml
+version: 1
+refs:
+  DEFAULT_API_KEY: <your existing LLM key — leave it alone>
+  HINDSIGHT_API_KEY: <the Hindsight server's Bearer token>
+```
+
+(Alternatively, export `HINDSIGHT_API_KEY` in the environment that starts
+`dsh web`, or put it in a `.env` file.) Because resolution is per call,
+editing the store — or rotating the token in place — takes effect on the
+next operation: no restart, no config edit. And the secret itself appears
+nowhere in a file that gets committed or shipped; the preset row and this
+plugin's `cordis.patch.yml` carry only the reference name.
 
 ## Behavior
 
