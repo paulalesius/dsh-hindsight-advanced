@@ -18,6 +18,12 @@ import type { ResolvedConfig } from './config.ts'
 import { recallTags, scopeTags, type MemoryScope } from './tiers.ts'
 import type { DirectiveRule, RecallHit, RecallOptions } from './types.ts'
 
+/** The response token budget for source-fact provenance on recall. The
+ *  enrichment is post-selection (it cannot change which facts are recalled);
+ *  the budget only bounds how many backing facts are returned for the hits
+ *  that were. */
+const SOURCE_FACTS_TOKENS = 512
+
 /** One mounted bank and the operations against it. */
 export interface Mount {
   /** The mount's validated configuration. */
@@ -25,7 +31,9 @@ export interface Mount {
   /** The mount's bank, as a REST path relative to the base URL. */
   bankPath: string
   /** Targeted semantic search over the mount's bank, scoped to `session`'s
-   *  visible tiers (`undefined` session: the whole bank). */
+   *  visible tiers (`undefined` session: the whole bank). Hits carry the
+   *  bank's source-fact provenance (observation backing facts) when the
+   *  server returned it. */
   recall(
     query: string,
     signal: AbortSignal,
@@ -33,8 +41,17 @@ export interface Mount {
     options?: RecallOptions,
   ): Promise<RecallHit[]>
   /** Store a durable memory tagged with `session`'s tier for `scope`
-   *  (`undefined` session: the global tier, visible everywhere). */
-  retain(content: string, signal: AbortSignal, session: Session | undefined, scope: MemoryScope): Promise<void>
+   *  (`undefined` session: the global tier, visible everywhere). `timestamp`,
+   *  when the caller knows when the content OCCURRED (an ISO 8601 date or
+   *  `'unset'` for timeless content), is forwarded verbatim; omitted, the
+   *  bank stamps the storage time. */
+  retain(
+    content: string,
+    signal: AbortSignal,
+    session: Session | undefined,
+    scope: MemoryScope,
+    timestamp?: string,
+  ): Promise<void>
   /** A synthesized answer grounded in the bank's facts, with the same tier
    *  scoping as recall. */
   reflect(query: string, signal: AbortSignal, session: Session | undefined): Promise<string>
@@ -131,20 +148,47 @@ export function createMount(
           ? [...options.types]
           : ['world', 'experience', 'observation'],
         prefer_observations: true,
+        // Source-fact provenance: a budgeted POST-selection enrichment — it
+        // cannot change which facts are selected or in what order, only add
+        // the backing facts behind observation hits, which the renderer
+        // surfaces under those hits.
+        include: { source_facts: { max_tokens: SOURCE_FACTS_TOKENS } },
       }
       withTierFilter(body, session)
       const data = await call(`${bankPath}/memories/recall`, body, signal)
       const results = data.results
       if (!Array.isArray(results)) return []
+      const sourceFacts: Record<string, unknown> =
+        typeof data.source_facts === 'object' && data.source_facts !== null
+          ? data.source_facts as Record<string, unknown>
+          : {}
+      /** A raw recall hit as returned by the server: the surfaced shape,
+       *  plus the provenance field the map below resolves away. */
+      type RawHit = RecallHit & { source_fact_ids?: unknown }
       return results
-        .filter((hit): hit is RecallHit =>
+        .filter((hit): hit is RawHit =>
           typeof hit === 'object' && hit !== null
           && typeof (hit as RecallHit).id === 'string'
           && typeof (hit as RecallHit).text === 'string',
         )
+        .map((hit): RecallHit => {
+          // Resolve the hit's source-fact ids to their text (order kept,
+          // missing entries skipped); absent for hits the server did not
+          // back with source facts.
+          const ids = Array.isArray(hit.source_fact_ids) ? hit.source_fact_ids : []
+          const sources: string[] = []
+          for (const id of ids) {
+            if (typeof id !== 'string') continue
+            const fact = sourceFacts[id]
+            if (typeof fact !== 'object' || fact === null) continue
+            const text = (fact as RecallHit).text
+            if (typeof text === 'string' && text.trim().length > 0) sources.push(text.trim())
+          }
+          return sources.length > 0 ? { ...hit, sources } : hit
+        })
     },
 
-    async retain(content, signal, session, scope): Promise<void> {
+    async retain(content, signal, session, scope, timestamp): Promise<void> {
       // `async: true` acknowledges fast and runs the bank's fact extraction in
       // the background; the default (synchronous) waits for the bank to process
       // the memory before returning, so the next recall already sees it.
@@ -155,6 +199,11 @@ export function createMount(
       const tags = session === undefined ? [] : scopeTags(session, scope)
       const item: Record<string, unknown> = { content }
       if (tags.length > 0) item.tags = tags
+      // An explicit occurrence time (ISO 8601, or 'unset' for timeless
+      // content) tells the bank when the content HAPPENED, not just when it
+      // was stored; omitted, the bank stamps the storage time, so the field
+      // is only sent when the caller actually knows a better one.
+      if (timestamp !== undefined && timestamp.length > 0) item.timestamp = timestamp
       const body: Record<string, unknown> = { items: [item] }
       if (config.retainAsync) body.async = true
       await call(`${bankPath}/memories`, body, signal)

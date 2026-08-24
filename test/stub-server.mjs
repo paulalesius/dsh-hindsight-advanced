@@ -28,13 +28,18 @@ const server = http.createServer((req, res) => {
     state.requests.push({ method: req.method, path: url.pathname, query: url.search, bank, body: data, authorization: req.headers.authorization ?? null })
 
     if (req.method === 'POST' && rest[0] === 'memories' && rest.length === 1) {
-      // retain
+      // retain. A retained text marked `[observation] ...` is stored as an
+      // observation fact (marker stripped) so recall can exercise the
+      // observation type and its source-fact provenance.
       const items = Array.isArray(data.items) ? data.items : []
       for (const item of items) {
+        const content = String(item.content ?? '')
+        const isObservation = content.startsWith('[observation] ')
         state.memories.push({
           id: `m${state.nextId++}`,
           bank,
-          text: String(item.content ?? ''),
+          text: isObservation ? content.slice('[observation] '.length) : content,
+          observation: isObservation,
           tags: Array.isArray(item.tags) ? [...item.tags] : [],
         })
       }
@@ -52,8 +57,22 @@ const server = http.createServer((req, res) => {
       const words = String(data.query ?? '').toLowerCase().split(/\W+/).filter(word => word.length > 3)
       const results = hits
         .filter(memory => words.some(word => memory.text.toLowerCase().includes(word)))
-        .map(memory => ({ id: memory.id, text: memory.text, type: 'world', tags: memory.tags }))
-      return json(200, { results })
+        .map(memory => {
+          const hit = { id: memory.id, text: memory.text, type: memory.observation ? 'observation' : 'world', tags: memory.tags }
+          if (memory.observation) hit.source_fact_ids = [`${memory.id}-src`]
+          return hit
+        })
+      // Provenance, like the real server: sent only when the client requests
+      // it, and only observation hits are backed by source facts.
+      const sourceFacts = {}
+      if (data.include !== undefined && data.include !== null && data.include.source_facts !== undefined) {
+        for (const hit of results) {
+          for (const id of hit.source_fact_ids ?? []) {
+            sourceFacts[id] = { id, text: `the raw fact behind: ${hit.text}` }
+          }
+        }
+      }
+      return json(200, Object.keys(sourceFacts).length > 0 ? { results, source_facts: sourceFacts } : { results })
     }
     if (req.method === 'PATCH' && rest[0] === 'config') {
       // per-bank config update; the bank 'flaky' rejects it to exercise the

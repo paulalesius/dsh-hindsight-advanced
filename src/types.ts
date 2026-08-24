@@ -9,6 +9,10 @@ export interface RecallHit {
   id: string
   text: string
   type?: string | null
+  /** The source facts the bank returned behind this hit (observation
+   *  provenance), resolved to their text in order; absent when the server
+   *  returned none. */
+  sources?: string[]
 }
 
 /** One active directive — a standing rule stored in a bank — as the mount

@@ -5,7 +5,10 @@
 // inside a bank, the three visibility tiers), authorization (literal key,
 // credential ref via the seam, ref via the environment fallback), tool
 // execution (retain / recall / reflect, with tier tags, plus standing
-// directives: kind: directive, tier-scoped listing, rules-on-empty-recall),
+// directives: kind: directive, tier-scoped listing, rules-on-empty-recall,
+// plus provenance: budgeted source-fact enrichment on recall, hit ids, and
+// `from:` lines under observation hits — in the tool AND the auto-recall
+// snapshot — and retain's explicit occurrence timestamp),
 // and the automatic pre-step recall: snapshot rows ride the pre-step
 // decision (landing AFTER the triggering message) and are only ever
 // appended — the plugin never replaces or erases a previous snapshot.
@@ -237,6 +240,25 @@ async function runStep(listener, a, step, messages) {
   assert.equal(asyncReq.body.async, true)
   assert.match(asyncResult.text, /stored for background extraction/)
   console.log('ok  mount A: retainAsync: true → body carries async, reports background extraction')
+
+  // retain with an explicit occurrence time: forwarded verbatim — an ISO
+  // date ('when it happened') or 'unset' (timeless); omitted, the body is
+  // exactly what it was (the bank stamps the storage time instead)
+  await tool.execute(
+    { action: 'retain', text: 'The team migrated to the new CI in June.', timestamp: '2026-06-01T00:00:00Z' },
+    { signal: baseSignal },
+  )
+  assert.deepEqual(state.requests.at(-1).body, {
+    items: [{ content: 'The team migrated to the new CI in June.', timestamp: '2026-06-01T00:00:00Z' }],
+  })
+  await tool.execute(
+    { action: 'retain', text: 'The project name derives from its first city.', timestamp: 'unset' },
+    { signal: baseSignal },
+  )
+  assert.deepEqual(state.requests.at(-1).body, {
+    items: [{ content: 'The project name derives from its first city.', timestamp: 'unset' }],
+  })
+  console.log('ok  mount A: retain forwards an explicit occurrence timestamp (ISO, and "unset")')
 
   // recall — the stored memory comes back; without an agent in the
   // execution there is no session context, hence no tier filter
@@ -573,6 +595,44 @@ async function runStep(listener, a, step, messages) {
   assert.match(daveSnap.data.content[0].text, /Standing rules/)
   assert.match(daveSnap.data.content[0].text, /Always use tabs in this project/)
   console.log('ok  mount F: a standing rule reaches the model even on an empty recall')
+}
+
+// ── mount G: provenance — source facts render under their observation hit ───
+{
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'provenance' })
+  const tool = ctx.tools.registered[0]
+  const listener = ctx.listeners[0].fn
+  const alice = { session: makeSession('sess-g1', { agentPreset: 'standard' }) }
+
+  // a raw world fact and the observation consolidated from it
+  await tool.execute({ action: 'retain', text: 'The user works remotely from home.' }, { signal: baseSignal })
+  await tool.execute({ action: 'retain', text: '[observation] The user is a remote worker based at home.' }, { signal: baseSignal })
+
+  // the recall body requests the budgeted source-facts enrichment
+  await tool.execute({ action: 'recall', query: 'remote worker' }, { agent: alice, signal: baseSignal })
+  const recallReq = state.requests.at(-1)
+  assert.deepEqual(recallReq.body.include, { source_facts: { max_tokens: 512 } }, 'source facts requested, budgeted')
+
+  // the observation hit renders its backing fact under it; the raw fact does
+  // not (it is not an observation, so the server backs nothing)
+  const result = await tool.execute({ action: 'recall', query: 'remote worker' }, { agent: alice, signal: baseSignal })
+  assert.match(result.text, /remote worker based at home\. \(observation\) id:m\d+/, 'the observation hit carries its id')
+  assert.match(result.text, /from: the raw fact behind: The user is a remote worker based at home\./, 'its backing fact renders under it')
+  assert.match(result.text, /works remotely from home\. \(world\) id:m\d+/, 'the raw fact carries its id')
+  assert.doesNotMatch(result.text, /from: the raw fact behind: The user works remotely from home\./, 'the raw fact gets no from line')
+  console.log('ok  mount G: recall requests budgeted source facts; the observation renders its from line')
+
+  // the auto-recall snapshot carries the same provenance (id + from line)
+  await runStep(listener, alice, 1, [userMsg('is the user a remote worker?')])
+  const autoReq = state.requests.filter(request =>
+    request.path === '/v1/default/banks/provenance/memories/recall',
+  ).at(-1)
+  assert.deepEqual(autoReq.body.include, { source_facts: { max_tokens: 512 } }, 'auto-recall requests source facts too')
+  const snap = snapshots(alice.session).at(-1).data.content[0].text
+  assert.match(snap, /remote worker based at home\. \(observation\) id:m\d+/, 'the snapshot observation carries its id')
+  assert.match(snap, /from: the raw fact behind: The user is a remote worker based at home\./, 'its from line lands in the snapshot')
+  console.log('ok  mount G: the automatic snapshot carries provenance (id + from line) too')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

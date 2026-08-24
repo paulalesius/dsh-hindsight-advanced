@@ -14,12 +14,17 @@ import type { DirectiveRule, RecallHit } from './types.ts'
 /** Bound for the recall query drawn from the user message. */
 export const MAX_QUERY_CHARS = 1000
 
-/** Render hits as the model-facing memory text. */
+/** Render hits as the model-facing memory text. Every hit carries its id
+ *  (the handle for memory curation); an observation hit the bank backed
+ *  with source facts gets its backing facts under it, one `from:` line. */
 export function renderRecall(bank: string, hits: RecallHit[]): string {
   const lines = [`Relevant memories from the Hindsight bank "${bank}":`]
   for (const hit of hits) {
     const type = typeof hit.type === 'string' && hit.type.length > 0 ? ` (${hit.type})` : ''
-    lines.push(`- ${hit.text.trim()}${type}`)
+    lines.push(`- ${hit.text.trim()}${type} id:${hit.id}`)
+    if (hit.sources !== undefined && hit.sources.length > 0) {
+      lines.push(`  from: ${hit.sources.join('; ')}`)
+    }
   }
   return lines.join('\n')
 }

@@ -64,6 +64,13 @@ export function buildTool(mount: Mount) {
           "Retain with kind 'directive' only: a short unique name for the rule (e.g. 'shell-safe-commit'). "
           + 'Required when kind is directive.',
       },
+      timestamp: {
+        type: 'string',
+        description:
+          'Retain of a memory only. When the content OCCURRED, as an ISO 8601 date (e.g. "2026-06-01") — '
+          + 'for facts about the past, not just when they were stored. Use "unset" for timeless content. '
+          + 'Omit to record the storage time.',
+      },
       types: {
         type: 'array',
         description: 'Recall only. Restrict the search to these fact types.',
@@ -94,6 +101,9 @@ export function buildTool(mount: Mount) {
         case 'retain': {
           const content = (args.text ?? '').trim()
           if (content.length === 0) throw new Error('hindsight: text is required for retain')
+          // An explicit occurrence time, forwarded only when the model gave
+          // one ('' → the bank stamps the storage time instead).
+          const timestamp = typeof args.timestamp === 'string' ? args.timestamp.trim() : ''
           if (args.kind === 'directive') {
             const directiveName = (args.name ?? '').trim()
             if (directiveName.length === 0) {
@@ -106,7 +116,13 @@ export function buildTool(mount: Mount) {
               text: `stored as standing directive "${directiveName}"; it is applied automatically at the start of every turn`,
             }
           }
-          await mount.retain(content, exec.signal, exec.agent?.session, args.scope ?? config.retainScope)
+          await mount.retain(
+            content,
+            exec.signal,
+            exec.agent?.session,
+            args.scope ?? config.retainScope,
+            timestamp.length > 0 ? timestamp : undefined,
+          )
           return {
             action: 'retain',
             bank: config.bank,

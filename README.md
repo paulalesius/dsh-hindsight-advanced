@@ -9,12 +9,15 @@ right things back at the right time.
 
 What your agent gets:
 
-- a **`hindsight` tool** — it stores what is worth remembering (`retain`),
-  finds it again when it is needed (`recall`), and can ask the memory a
-  question and get an answer grounded in it (`reflect`);
+- a **`hindsight` tool** — it stores what is worth remembering (`retain`,
+  including when the thing happened, not just when it was stored), finds it
+  again when it is needed (`recall`), and can ask the memory a question and
+  get an answer grounded in it (`reflect`);
 - **automatic recall** — at the start of every turn, the memories that
   matter to the current conversation are placed in front of the agent, so
-  nothing relevant is ever asked for twice;
+  nothing relevant is ever asked for twice. When a memory is an inference
+  the bank drew from stored facts, the facts it was drawn from are shown
+  right under it, so you can always see what a belief rests on;
 - **standing rules** — "always do this" and "never do that" rules that are
   applied on every turn until you change them, even when nothing else in
   the memory matches;
