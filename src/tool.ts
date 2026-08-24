@@ -27,12 +27,14 @@ export function buildTool(mount: Mount) {
       + `\n`
       + `reflect — ask the bank a question and get a synthesized answer grounded in its facts. Use it when the answer must combine several memories, e.g. "what do we know about X?".\n`
       + `\n`
+      + `invalidate — retire a stored memory that has turned out to be wrong or stale (the user corrected it, or you found a direct contradiction), so it stops appearing in recall. Pass the memory's id (the id:<uuid> shown in recall results and the per-turn snapshot) and the reason. Call it only when you are confident the memory is wrong: invalidation is soft and reversible, but do not clobber a memory future sessions still need. If the corrected truth is already stored, prefer invalidating the stale memory over retaining a contradicting fact — a stale memory left live keeps making the bank return both beliefs forever.\n`
+      + `\n`
       + `If the Hindsight server is unreachable the call fails with an error: continue the work without the memory and do not retry it repeatedly.`,
     parameters: {
       action: {
         type: 'string',
         required: true,
-        enum: ['retain', 'recall', 'reflect'],
+        enum: ['retain', 'recall', 'reflect', 'invalidate'],
         description: 'The operation to perform.',
       },
       text: {
@@ -79,6 +81,16 @@ export function buildTool(mount: Mount) {
       max_tokens: {
         type: 'number',
         description: 'Recall only. Token budget for the response; defaults to the configured budget.',
+      },
+      id: {
+        type: 'string',
+        description:
+          'Invalidate only. The memory id to retire, as shown in recall results and the per-turn '
+          + 'snapshot (id:<uuid>).',
+      },
+      reason: {
+        type: 'string',
+        description: 'Invalidate only. Why the memory is wrong or stale; recorded with the invalidation.',
       },
     },
     output: {
@@ -147,6 +159,18 @@ export function buildTool(mount: Mount) {
           if (query.length === 0) throw new Error('hindsight: query is required for reflect')
           const answer = await mount.reflect(query, exec.signal, exec.agent?.session)
           return { action: 'reflect', bank: config.bank, text: answer }
+        }
+        case 'invalidate': {
+          const memoryId = (args.id ?? '').trim()
+          if (memoryId.length === 0) throw new Error('hindsight: id is required for invalidate')
+          const reason = (args.reason ?? '').trim()
+          if (reason.length === 0) throw new Error('hindsight: reason is required for invalidate')
+          await mount.invalidate(memoryId, reason, exec.signal)
+          return {
+            action: 'invalidate',
+            bank: config.bank,
+            text: `memory ${memoryId} invalidated and archived; it no longer appears in recall (the bank can restore it)`,
+          }
         }
         default:
           throw new Error(`hindsight: unknown action ${String(args.action)}`)

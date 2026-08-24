@@ -9,6 +9,9 @@
 // plus provenance: budgeted source-fact enrichment on recall, hit ids, and
 // `from:` lines under observation hits — in the tool AND the auto-recall
 // snapshot — and retain's explicit occurrence timestamp),
+// plus curation: invalidating a memory the model has shown to be wrong or
+// stale (a soft PATCH with a recorded reason; the retired memory leaves the
+// recall surface),
 // and the automatic pre-step recall: snapshot rows ride the pre-step
 // decision (landing AFTER the triggering message) and are only ever
 // appended — the plugin never replaces or erases a previous snapshot.
@@ -212,7 +215,7 @@ async function runStep(listener, a, step, messages) {
   const tool = ctx.tools.registered[0]
   const listener = ctx.listeners[0].fn
   assert.equal(tool.name, 'hindsight')
-  assert.deepEqual(tool.parameters.properties.action.enum, ['retain', 'recall', 'reflect'])
+  assert.deepEqual(tool.parameters.properties.action.enum, ['retain', 'recall', 'reflect', 'invalidate'])
   assert.ok(tool.parameters.required?.includes('action'))
   assert.equal(tool.parameters.properties.tags, undefined, 'no tag parameter')
   console.log('ok  tool registered, pre-step listener prepended (one mount, one bank)')
@@ -289,6 +292,8 @@ async function runStep(listener, a, step, messages) {
   // argument validation still runs through defineTool
   await assert.rejects(() => tool.execute({ action: 'retain' }, { signal: baseSignal }), /text/)
   await assert.rejects(() => tool.execute({ action: 'recall' }, { signal: baseSignal }), /query/)
+  await assert.rejects(() => tool.execute({ action: 'invalidate', reason: 'corrected by the user' }, { signal: baseSignal }), /id/)
+  await assert.rejects(() => tool.execute({ action: 'invalidate', id: 'm1' }, { signal: baseSignal }), /reason/)
   console.log('ok  mount A: missing required args are rejected')
 
   // ── automatic recall (append-only: never replaces a prior turn) ───────────────────────────
@@ -633,6 +638,45 @@ async function runStep(listener, a, step, messages) {
   assert.match(snap, /remote worker based at home\. \(observation\) id:m\d+/, 'the snapshot observation carries its id')
   assert.match(snap, /from: the raw fact behind: The user is a remote worker based at home\./, 'its from line lands in the snapshot')
   console.log('ok  mount G: the automatic snapshot carries provenance (id + from line) too')
+}
+
+// ── mount H: curation — the model retires a memory it has shown to be wrong ─
+{
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'curation' })
+  const tool = ctx.tools.registered[0]
+
+  // a memory the conversation later contradicts
+  await tool.execute({ action: 'retain', text: 'The project uses a Postgres database at home.' }, { signal: baseSignal })
+
+  // the id the model acts on is the one the recall result rendered
+  const recallText = (await tool.execute({ action: 'recall', query: 'which database does the project use' }, { signal: baseSignal })).text
+  const match = recallText.match(/id:(m\d+)/)
+  assert.ok(match, `the recall result carries the id to invalidate: ${recallText}`)
+  const memoryId = match[1]
+
+  // invalidate → a PATCH with the soft-retire state and the recorded reason
+  const result = await tool.execute(
+    { action: 'invalidate', id: memoryId, reason: 'corrected by the user: the project moved to MySQL' },
+    { signal: baseSignal },
+  )
+  const patchReq = state.requests.at(-1)
+  assert.equal(patchReq.method, 'PATCH')
+  assert.equal(patchReq.path, `/v1/default/banks/curation/memories/${memoryId}`)
+  assert.deepEqual(patchReq.body, { state: 'invalidated', reason: 'corrected by the user: the project moved to MySQL' })
+  assert.match(result.text, new RegExp(`memory ${memoryId} invalidated`))
+
+  // a soft retire, not a shred: the memory is excluded from recall now
+  const after = (await tool.execute({ action: 'recall', query: 'which database does the project use' }, { signal: baseSignal })).text
+  assert.equal(after, 'no memories matched')
+  console.log('ok  mount H: invalidate PATCHes the memory (state + reason) and it leaves the recall surface')
+
+  // an unknown id is a clean bounded error, like every other mount operation
+  await assert.rejects(
+    () => tool.execute({ action: 'invalidate', id: 'm-none', reason: 'wrong id probe' }, { signal: baseSignal }),
+    /hindsight: .*returned HTTP 404/,
+  )
+  console.log('ok  mount H: an unknown id degrades to the clean bounded error')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

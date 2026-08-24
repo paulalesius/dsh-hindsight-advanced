@@ -1,5 +1,6 @@
-// A stub Hindsight REST server: just enough of retain/recall/reflect to
-// exercise the plugin end-to-end, plus a request log for shape assertions.
+// A stub Hindsight REST server: just enough of retain/recall/reflect/
+// invalidate to exercise the plugin end-to-end, plus a request log for
+// shape assertions.
 import http from 'node:http'
 
 export const state = {
@@ -47,7 +48,7 @@ const server = http.createServer((req, res) => {
     }
     if (req.method === 'POST' && rest[0] === 'memories' && rest[1] === 'recall') {
       // recall
-      let hits = state.memories.filter(memory => memory.bank === bank)
+      let hits = state.memories.filter(memory => memory.bank === bank && !memory.invalidated)
       if (Array.isArray(data.tags) && data.tags.length > 0) {
         const strict = String(data.tags_match ?? 'any').endsWith('_strict')
         hits = hits.filter(memory => strict
@@ -73,6 +74,23 @@ const server = http.createServer((req, res) => {
         }
       }
       return json(200, Object.keys(sourceFacts).length > 0 ? { results, source_facts: sourceFacts } : { results })
+    }
+    if (req.method === 'PATCH' && rest[0] === 'memories' && rest.length === 2) {
+      // update a memory (invalidation). Like the real server: soft — the
+      // memory is archived, excluded from recall, and restorable.
+      const memory = state.memories.find(candidate => candidate.id === rest[1] && candidate.bank === bank)
+      if (memory === undefined) return json(404, { error: `stub: no memory ${rest[1]} in bank ${bank}` })
+      if (data.state === 'invalidated') {
+        memory.invalidated = true
+        memory.invalidate_reason = data.reason ?? null
+        return json(200, { id: memory.id, bank_id: bank, state: 'invalidated', reason: data.reason ?? null })
+      }
+      if (data.state === 'valid') {
+        memory.invalidated = false
+        memory.invalidate_reason = null
+        return json(200, { id: memory.id, bank_id: bank, state: 'valid' })
+      }
+      return json(422, { error: `stub: unknown state ${JSON.stringify(data.state)}` })
     }
     if (req.method === 'PATCH' && rest[0] === 'config') {
       // per-bank config update; the bank 'flaky' rejects it to exercise the
@@ -109,7 +127,9 @@ const server = http.createServer((req, res) => {
     }
     if (req.method === 'POST' && rest[0] === 'reflect') {
       // reflect
-      const basedOn = state.memories.filter(memory => memory.bank === bank).map(memory => memory.id)
+      const basedOn = state.memories
+        .filter(memory => memory.bank === bank && !memory.invalidated)
+        .map(memory => memory.id)
       return json(200, { text: `FAKE-REFLECT:${data.query}`, based_on: basedOn })
     }
     json(404, { error: `stub: no route for ${req.method} ${url.pathname}` })

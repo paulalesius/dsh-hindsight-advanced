@@ -30,7 +30,7 @@
  *
  * What each mount gives its preset's agents:
  *
- * - a `hindsight` tool with three actions:
+ * - a `hindsight` tool with four actions:
  *   - `retain` — store a durable memory. WHAT and WHEN gets stored is decided
  *     by the model from the tool description (durable facts, preferences,
  *     decisions and their rationale; never ephemera or raw code). WHERE it
@@ -49,6 +49,12 @@
  *     to the session's three visible tiers (below).
  *   - `reflect` — a synthesized answer grounded in the bank's facts, with
  *     the same tier scoping as recall.
+ *   - `invalidate` — retire a memory the model has shown to be wrong or
+ *     stale. The model passes the memory's id (the handle recall results
+ *     and the per-turn snapshot render as `id:<uuid>`) and a reason; the
+ *     bank soft-retires it — excluded from recall and consolidation,
+ *     archived, reversible server-side — so a corrected belief stops
+ *     competing with the stale one in every future recall.
  * - automatic recall: on the first step of each turn the latest user message
  *   is queried and the bank's active standing directives are listed, and
  *   both become a plugin-sourced snapshot message (the same pattern

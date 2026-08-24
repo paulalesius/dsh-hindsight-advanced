@@ -8,7 +8,8 @@ developing it.**
 
 A userland DeepSeek Harness (DSH) profile bundle that mounts Hindsight
 long-term memory for a DSH profile: one `hindsight` tool (retain / recall /
-reflect) plus automatic per-turn recall, against a Hindsight bank. **No DSH
+reflect / invalidate) plus automatic per-turn recall, against a Hindsight
+bank. **No DSH
 source modifications, ever** — the whole surface is one entry file plus a
 small tree of dependency-light ESM TypeScript modules in `src/`, resolved
 from the DSH checkout through the `node_modules` symlink in this directory.
@@ -88,13 +89,13 @@ tree — preserve them when you change anything:
 | `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
 | `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
 | `src/client.ts` | the REST transport: one bounded call, one clean bounded error shape |
-| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`listDirectives`/`retainDirective` operations — **the extension point for new Hindsight operations** |
+| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`invalidate`/`listDirectives`/`retainDirective` operations — **the extension point for new Hindsight operations** |
 | `src/snapshot.ts` | auto-recall surface logic: query derivation, hit + standing-rules rendering (hits carry their ids; observation hits carry their source facts as `from:` lines), identical-recall snapshot lookup |
 | `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
 | `src/autorecall.ts` | the `agent/pre-step` listener (bounded lookup + surface commit) |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 32 checks, seven mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 34 checks, eight mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |
@@ -112,7 +113,7 @@ TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
 
-# the stub suite (32 checks)
+# the stub suite (34 checks)
 cd test && node --import ./register.mjs test.mjs
 
 # preset-mount verification (the custom agent preset row)

@@ -1,6 +1,7 @@
 /**
  * One mount: a fixed bank plus its memory operations (retain / recall /
- * reflect) and the lazy one-time sync of the declared bank config.
+ * reflect / invalidate) and the lazy one-time sync of the declared bank
+ * config.
  *
  * `createMount` is the plugin's per-mount factory: it owns the mount's
  * mutable state (the bank-config sync) in a closure, so every module
@@ -68,6 +69,13 @@ export interface Mount {
     session: Session | undefined,
     scope: MemoryScope,
   ): Promise<void>
+  /** Soft-retire a stored memory by its id (the handle recall results and
+   *  the snapshot render as `id:<uuid>`): the bank excludes it from recall
+   *  and consolidation, prunes its derived observations and links, and moves
+   *  it to the archive. Reversible server-side; `reason` is recorded with the
+   *  invalidation. No session: the act is on an id the bank already surfaced
+   *  to this session, not a tier-scoped query. */
+  invalidate(memoryId: string, reason: string, signal: AbortSignal): Promise<void>
 }
 
 /**
@@ -249,6 +257,17 @@ export function createMount(
       const body: Record<string, unknown> = { name, content, is_active: true }
       if (tags.length > 0) body.tags = tags
       await call(`${bankPath}/directives`, body, signal)
+    },
+
+    async invalidate(memoryId, reason, signal): Promise<void> {
+      // A curation act on an id the bank already surfaced (a recall result,
+      // a snapshot line). Soft by construction: the bank archives the memory
+      // with its reason rather than deleting it, and can restore it
+      // (state: 'valid') — so a wrong call is recoverable and auditable.
+      await syncBankConfig(signal)
+      const body: Record<string, unknown> = { state: 'invalidated' }
+      if (reason.length > 0) body.reason = reason
+      await call(`${bankPath}/memories/${encodeURIComponent(memoryId)}`, body, signal, 'PATCH')
     },
   }
 }

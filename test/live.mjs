@@ -2,8 +2,10 @@
 // workspace package (the deployable file), with the production config shape:
 // a single mount routing to a scratch bank. Also verifies the visibility
 // tiers against the REAL server: retain tier tags (preset default, session
-// tier), a server-side tag read-back via /memories/list, and the recall
-// tier filter (own + preset tiers visible, a sibling session's tier not).
+// tier), a server-side tag read-back via /memories/list, the recall tier
+// filter (own + preset tiers visible, a sibling session's tier not), and
+// invalidation (the soft PATCH retires a memory and it leaves the recall
+// surface).
 //
 // Uses a scratch bank (auto-created by the server) and deletes it at the end,
 // so the user's real banks are never touched.
@@ -135,6 +137,11 @@ assert.ok(hits.length > 0, `recall never matched: ${JSON.stringify(hits)}`)
 assert.match(String(hits), /live-demo|pnpm|192\.168\.8\.20/)
 console.log('ok  recall (tier-filtered) → matched the preset-tier memory')
 
+// the session-tier memory's id, captured during the tier-visibility block
+// (its render is the only place the model sees it) and consumed by the
+// invalidation check below.
+let notionId = ''
+
 // ── tier visibility: own + preset tiers visible, a sibling's tier is not ────
 {
   // alice (the owner) sees her own session tier, once indexed
@@ -148,6 +155,11 @@ console.log('ok  recall (tier-filtered) → matched the preset-tier memory')
   }
   assert.ok(/Notion/.test(sessionHits), `the owner's own session-tier memory never matched: ${JSON.stringify(sessionHits)}`)
 
+  // the id the model would invalidate is the one the recall result renders
+  const notionIdMatch = sessionHits.match(/id:([^\s]+)/)
+  assert.ok(notionIdMatch, `the session-tier recall rendered no id to invalidate: ${JSON.stringify(sessionHits)}`)
+  notionId = notionIdMatch[1]
+
   // bob (same preset, another session): the preset tier is shared, the
   // session tier is not — the server-side tag filter makes this exact
   const bobPreset = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: bob, signal })
@@ -155,6 +167,30 @@ console.log('ok  recall (tier-filtered) → matched the preset-tier memory')
   const bobSession = await run({ action: 'recall', query: 'where does the smoke session keep its scratch notes' }, { agent: bob, signal })
   assert.doesNotMatch(String(bobSession.text), /Notion/, 'a sibling session\'s session-tier memory must stay invisible')
   console.log('ok  tier visibility → own + preset tiers visible, a sibling session\'s tier is not')
+}
+
+// ── invalidate: a wrong or stale memory is soft-retired by its rendered id ──
+{
+  const out = await run(
+    { action: 'invalidate', id: notionId, reason: 'live round-trip: retiring the scratch note' },
+    { agent: alice, signal },
+  )
+  assert.equal(out.action, 'invalidate')
+  assert.equal(out.bank, BANK)
+  assert.match(String(out.text), /invalidated/)
+
+  // the retired memory leaves the recall surface (a short poll in case the
+  // server propagates the state change with a beat of latency)
+  let after = ''
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const out2 = await run({ action: 'recall', query: 'where does the smoke session keep its scratch notes' }, { agent: alice, signal })
+    after = String(out2.text)
+    if (!/Notion/.test(after)) break
+    await new Promise(r => setTimeout(r, 3_000))
+  }
+  assert.doesNotMatch(after, /Notion/, `the invalidated memory still surfaces in recall: ${JSON.stringify(after)}`)
+  console.log('ok  invalidate → the memory is soft-retired and leaves the recall surface')
 }
 
 // ── reflect: synthesized answer grounded in the bank ────────────────────────
