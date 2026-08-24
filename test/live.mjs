@@ -5,7 +5,8 @@
 // tier), a server-side tag read-back via /memories/list, the recall tier
 // filter (own + preset tiers visible, a sibling session's tier not), and
 // invalidation (the soft PATCH retires a memory and it leaves the recall
-// surface).
+// surface), and observation curation (a derived observation is not
+// curatable; its backing fact — the from: line's id — is).
 //
 // Uses a scratch bank (auto-created by the server) and deletes it at the end,
 // so the user's real banks are never touched.
@@ -191,6 +192,41 @@ let notionId = ''
   }
   assert.doesNotMatch(after, /Notion/, `the invalidated memory still surfaces in recall: ${JSON.stringify(after)}`)
   console.log('ok  invalidate → the memory is soft-retired and leaves the recall surface')
+}
+
+// ── observation invalidation: only the backing fact is curatable ────────────
+// The bank's consolidation is asynchronous and not guaranteed on a tiny
+// scratch bank, so this check runs only when the server actually produced
+// an observation hit with a from: line.
+{
+  const out = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: alice, signal })
+  const text = String(out.text)
+  const fromId = text.match(/\(id:([^\s)]+)\)/)
+  const obsId = text.match(/\(observation\) id:([^\s]+)/)
+  if (fromId === null || obsId === null || fromId[1] === obsId[1]) {
+    console.log('skip  observation invalidation → the bank produced no observation hit to exercise it')
+  } else {
+    // the derived observation itself is not curatable
+    let errorText = ''
+    try {
+      await run({ action: 'invalidate', id: obsId[1], reason: 'derived, not curatable' }, { agent: alice, signal })
+    } catch (error) { errorText = String(error.message ?? error) }
+    assert.match(errorText, /hindsight: .*returned HTTP (400|404|409|422)/, `expected the server to refuse the observation invalidation, got: ${errorText}`)
+
+    // the backing fact (the from: line's id) is the curatable handle
+    const backing = await run({ action: 'invalidate', id: fromId[1], reason: 'live round-trip: retiring the backing fact' }, { agent: alice, signal })
+    assert.match(String(backing.text), /invalidated/)
+    let after = ''
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      const out2 = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: alice, signal })
+      after = String(out2.text)
+      if (!after.includes(`(id:${fromId[1]})`)) break
+      await new Promise(r => setTimeout(r, 3_000))
+    }
+    assert.doesNotMatch(after, `\\(id:${fromId[1]}\\)`, `the retired backing fact still renders as a source: ${JSON.stringify(after)}`)
+    console.log('ok  observation invalidation → the derived observation is refused, the backing fact is retired and its from line is pruned')
+  }
 }
 
 // ── reflect: synthesized answer grounded in the bank ────────────────────────

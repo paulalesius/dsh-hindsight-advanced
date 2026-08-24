@@ -10,9 +10,10 @@ export interface RecallHit {
   text: string
   type?: string | null
   /** The source facts the bank returned behind this hit (observation
-   *  provenance), resolved to their text in order; absent when the server
-   *  returned none. */
-  sources?: string[]
+   *  provenance), in order; each carries the backing fact's id (the handle
+   *  for invalidating it — the observation itself is derived and cannot be
+   *  invalidated) and its text; absent when the server returned none. */
+  sources?: { id: string; text: string }[]
 }
 
 /** One active directive — a standing rule stored in a bank — as the mount

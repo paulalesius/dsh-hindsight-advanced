@@ -180,17 +180,19 @@ export function createMount(
           && typeof (hit as RecallHit).text === 'string',
         )
         .map((hit): RecallHit => {
-          // Resolve the hit's source-fact ids to their text (order kept,
-          // missing entries skipped); absent for hits the server did not
-          // back with source facts.
+          // Resolve the hit's source-fact ids to the backing facts (order
+          // kept, missing entries skipped); absent for hits the server did
+          // not back with source facts. The ids ride along: they are the
+          // handle for invalidating the backing fact (the observation
+          // itself is derived and cannot be invalidated).
           const ids = Array.isArray(hit.source_fact_ids) ? hit.source_fact_ids : []
-          const sources: string[] = []
+          const sources: { id: string; text: string }[] = []
           for (const id of ids) {
             if (typeof id !== 'string') continue
             const fact = sourceFacts[id]
             if (typeof fact !== 'object' || fact === null) continue
             const text = (fact as RecallHit).text
-            if (typeof text === 'string' && text.trim().length > 0) sources.push(text.trim())
+            if (typeof text === 'string' && text.trim().length > 0) sources.push({ id, text: text.trim() })
           }
           return sources.length > 0 ? { ...hit, sources } : hit
         })

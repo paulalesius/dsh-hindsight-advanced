@@ -27,7 +27,7 @@ export function buildTool(mount: Mount) {
       + `\n`
       + `reflect — ask the bank a question and get a synthesized answer grounded in its facts. Use it when the answer must combine several memories, e.g. "what do we know about X?".\n`
       + `\n`
-      + `invalidate — retire a stored memory that has turned out to be wrong or stale (the user corrected it, or you found a direct contradiction), so it stops appearing in recall. Pass the memory's id (the id:<uuid> shown in recall results and the per-turn snapshot) and the reason. Call it only when you are confident the memory is wrong: invalidation is soft and reversible, but do not clobber a memory future sessions still need. If the corrected truth is already stored, prefer invalidating the stale memory over retaining a contradicting fact — a stale memory left live keeps making the bank return both beliefs forever.\n`
+      + `invalidate — retire a stored memory that has turned out to be wrong or stale (the user corrected it, or you found a direct contradiction), so it stops appearing in recall. Pass the memory's id (the id:<uuid> shown in recall results and the per-turn snapshot) and the reason. Call it only when you are confident the memory is wrong: invalidation is soft and reversible, but do not clobber a memory future sessions still need. If the corrected truth is already stored, prefer invalidating the stale memory over retaining a contradicting fact — a stale memory left live keeps making the bank return both beliefs forever. Only raw facts (world / experience) can be invalidated — if the hit is an observation, invalidate its backing fact: the id on the "from:" line under it.\n`
       + `\n`
       + `If the Hindsight server is unreachable the call fails with an error: continue the work without the memory and do not retry it repeatedly.`,
     parameters: {
@@ -86,7 +86,8 @@ export function buildTool(mount: Mount) {
         type: 'string',
         description:
           'Invalidate only. The memory id to retire, as shown in recall results and the per-turn '
-          + 'snapshot (id:<uuid>).',
+          + 'snapshot (id:<uuid>). For a consolidated observation hit, that is the backing fact\'s id '
+          + 'on the "from:" line under it — the observation itself is derived and cannot be invalidated.',
       },
       reason: {
         type: 'string',

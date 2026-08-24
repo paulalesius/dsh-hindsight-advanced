@@ -619,14 +619,15 @@ async function runStep(listener, a, step, messages) {
   const recallReq = state.requests.at(-1)
   assert.deepEqual(recallReq.body.include, { source_facts: { max_tokens: 512 } }, 'source facts requested, budgeted')
 
-  // the observation hit renders its backing fact under it; the raw fact does
-  // not (it is not an observation, so the server backs nothing)
+  // the observation hit renders its backing fact UNDER it — with the
+  // backing fact's id (the curatable handle); the raw fact hit gets no
+  // from line of its own (it is not an observation, so the server backs nothing)
   const result = await tool.execute({ action: 'recall', query: 'remote worker' }, { agent: alice, signal: baseSignal })
   assert.match(result.text, /remote worker based at home\. \(observation\) id:m\d+/, 'the observation hit carries its id')
-  assert.match(result.text, /from: the raw fact behind: The user is a remote worker based at home\./, 'its backing fact renders under it')
+  assert.match(result.text, /from: The user works remotely from home\. \(id:m\d+\)/, 'its backing fact renders under it, WITH its id')
   assert.match(result.text, /works remotely from home\. \(world\) id:m\d+/, 'the raw fact carries its id')
-  assert.doesNotMatch(result.text, /from: the raw fact behind: The user works remotely from home\./, 'the raw fact gets no from line')
-  console.log('ok  mount G: recall requests budgeted source facts; the observation renders its from line')
+  assert.doesNotMatch(result.text, /works remotely from home\. \(world\) id:m\d+\n  from:/, 'the raw fact gets no from line')
+  console.log('ok  mount G: recall requests budgeted source facts; the observation renders its from line with the backing fact\'s id')
 
   // the auto-recall snapshot carries the same provenance (id + from line)
   await runStep(listener, alice, 1, [userMsg('is the user a remote worker?')])
@@ -636,7 +637,7 @@ async function runStep(listener, a, step, messages) {
   assert.deepEqual(autoReq.body.include, { source_facts: { max_tokens: 512 } }, 'auto-recall requests source facts too')
   const snap = snapshots(alice.session).at(-1).data.content[0].text
   assert.match(snap, /remote worker based at home\. \(observation\) id:m\d+/, 'the snapshot observation carries its id')
-  assert.match(snap, /from: the raw fact behind: The user is a remote worker based at home\./, 'its from line lands in the snapshot')
+  assert.match(snap, /from: The user works remotely from home\. \(id:m\d+\)/, 'its from line (with the backing fact\'s id) lands in the snapshot')
   console.log('ok  mount G: the automatic snapshot carries provenance (id + from line) too')
 }
 
@@ -677,6 +678,30 @@ async function runStep(listener, a, step, messages) {
     /hindsight: .*returned HTTP 404/,
   )
   console.log('ok  mount H: an unknown id degrades to the clean bounded error')
+
+  // the hit the model usually sees is the CONSOLIDATED observation — the
+  // curatable handle is its backing fact, rendered on the from: line
+  await tool.execute({ action: 'retain', text: 'The billing service is written in Go.' }, { signal: baseSignal })
+  await tool.execute({ action: 'retain', text: '[observation] The billing service language is Go.' }, { signal: baseSignal })
+  const obsText = (await tool.execute({ action: 'recall', query: 'billing service' }, { signal: baseSignal })).text
+  const obsId = obsText.match(/\(observation\) id:(m\d+)/)?.[1]
+  const backingId = obsText.match(/\(id:(m\d+)\)/)?.[1]
+  assert.ok(obsId && backingId && obsId !== backingId, `the observation and its backing fact carry distinct ids: ${obsText}`)
+
+  // the derived observation itself is not curatable — the server refuses it
+  await assert.rejects(
+    () => tool.execute({ action: 'invalidate', id: obsId, reason: 'derived, not curatable' }, { signal: baseSignal }),
+    /hindsight: .*returned HTTP 400/,
+  )
+  console.log('ok  mount H: invalidating the derived observation itself is refused (HTTP 400)')
+
+  // invalidating the backing fact: the observation still surfaces, but its
+  // from line is pruned (the source fact is no longer a source fact)
+  await tool.execute({ action: 'invalidate', id: backingId, reason: 'the service was rewritten in Rust' }, { signal: baseSignal })
+  const afterObs = (await tool.execute({ action: 'recall', query: 'billing service' }, { signal: baseSignal })).text
+  assert.match(afterObs, /billing service language is Go\. \(observation\) id:/, 'the observation still surfaces')
+  assert.doesNotMatch(afterObs, /from:/, '... but its from line is gone')
+  console.log('ok  mount H: invalidating the backing fact prunes the from line, the observation stays')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

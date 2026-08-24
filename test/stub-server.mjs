@@ -36,13 +36,20 @@ const server = http.createServer((req, res) => {
       for (const item of items) {
         const content = String(item.content ?? '')
         const isObservation = content.startsWith('[observation] ')
-        state.memories.push({
+        const memory = {
           id: `m${state.nextId++}`,
           bank,
           text: isObservation ? content.slice('[observation] '.length) : content,
           observation: isObservation,
           tags: Array.isArray(item.tags) ? [...item.tags] : [],
-        })
+        }
+        // Emulate consolidation: the observation is backed by the most
+        // recent raw fact in the same bank — its curatable source fact.
+        if (isObservation) {
+          const backing = [...state.memories].reverse().find(candidate => candidate.bank === bank && !candidate.observation)
+          memory.source_fact_ids = backing ? [backing.id] : []
+        }
+        state.memories.push(memory)
       }
       return json(200, { success: true, bank_id: bank, items_count: items.length, async: Boolean(data.async) })
     }
@@ -60,16 +67,19 @@ const server = http.createServer((req, res) => {
         .filter(memory => words.some(word => memory.text.toLowerCase().includes(word)))
         .map(memory => {
           const hit = { id: memory.id, text: memory.text, type: memory.observation ? 'observation' : 'world', tags: memory.tags }
-          if (memory.observation) hit.source_fact_ids = [`${memory.id}-src`]
+          if (memory.observation) hit.source_fact_ids = memory.source_fact_ids
           return hit
         })
       // Provenance, like the real server: sent only when the client requests
-      // it, and only observation hits are backed by source facts.
+      // it, and only observation hits are backed by source facts. An
+      // invalidated backing fact is no longer a source fact (the client
+      // skips the missing entry).
       const sourceFacts = {}
       if (data.include !== undefined && data.include !== null && data.include.source_facts !== undefined) {
         for (const hit of results) {
           for (const id of hit.source_fact_ids ?? []) {
-            sourceFacts[id] = { id, text: `the raw fact behind: ${hit.text}` }
+            const backing = state.memories.find(candidate => candidate.id === id && !candidate.invalidated)
+            if (backing !== undefined) sourceFacts[id] = { id, text: backing.text }
           }
         }
       }
@@ -80,6 +90,11 @@ const server = http.createServer((req, res) => {
       // memory is archived, excluded from recall, and restorable.
       const memory = state.memories.find(candidate => candidate.id === rest[1] && candidate.bank === bank)
       if (memory === undefined) return json(404, { error: `stub: no memory ${rest[1]} in bank ${bank}` })
+      // Like the real server: only raw facts can be curated; observations
+      // are derived (their backing fact is the curatable handle). The real
+      // server answers this with HTTP 400 ("is a observation; only
+      // world/experience facts can be curated").
+      if (memory.observation) return json(400, { error: `stub: ${memory.id} is a observation; only world/experience facts can be curated` })
       if (data.state === 'invalidated') {
         memory.invalidated = true
         memory.invalidate_reason = data.reason ?? null
