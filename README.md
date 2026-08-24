@@ -2,64 +2,25 @@
 
 <p align="center"><img src="./misc/banner.jpg" alt="dsh-plugin-hindsight-advanced banner"/></p>
 
-Long-term memory for your DeepSeek Harness (dsh) agent. An agent's
-conversation ends when the session does — this plugin gives the agent
-memory that doesn't: it stores what is worth remembering, and brings the
-right things back at the right time.
-
-What your agent gets:
-
-- a **`hindsight` tool** — it stores what is worth remembering (`retain`,
-  including when the thing happened, not just when it was stored), finds it
-  again when it is needed (`recall`), and can ask the memory a question and
-  get an answer grounded in it (`reflect`);
-- **automatic recall** — at the start of every turn, the memories that
-  matter to the current conversation are placed in front of the agent, so
-  nothing relevant is ever asked for twice. When a memory is an inference
-  the bank drew from stored facts, the facts it was drawn from are shown
-  right under it, so you can always see what a belief rests on;
-- **standing rules** — "always do this" and "never do that" rules that are
-  applied on every turn until you change them, even when nothing else in
-  the memory matches;
-- **visibility you choose per memory** — every memory is visible to
-  everything in the bank (`global`), to one agent preset (`preset`), or to
-  a single session (`session`); a memory never appears outside its scope.
-
-The memories live in your own Hindsight server, not in the plugin.
-Uninstalling the plugin never touches them.
+A plugin for DeepSeek Harness (dsh) that integrates the Hindsight memory
+system: your agent stores memories in your own Hindsight server and brings
+the relevant ones back into the conversation.
 
 ## Installation
 
-You need a running Hindsight server (`hindsight-api` — any local port
-works; the config below points at it) and a DeepSeek Harness checkout.
-
-**1. Install the plugin.** One command does both halves — it links the
-plugin into your profile and registers the mounting row for it:
+With the `dsh` command:
 
 ```bash
-dsh plugin --profile web add /path/to/dsh-hindsight-advanced
+dsh plugin --profile web add /path/to/hindsight-advanced
 ```
 
-(Use a plain path, not a `file:` URL — a plain path links the source, so
-edits are picked up without reinstalling. Without the `dsh` binary on your
-PATH, run `node --import tsx/esm apps/cli/src/bin.ts plugin …` from inside
-the DSH checkout.)
+When running dsh from source:
 
-If you checked this repo out fresh, recreate the one machine-local link the
-source needs first: `ln -s /path/to/deepseek-harness/apps/cli/node_modules node_modules`
-inside this repo.
+```bash
+pnpm dsh plugin --profile web add /path/to/hindsight-advanced
+```
 
-**2. Restart `dsh web` once.**
-
-**3. Tell it which bank and server to use** — one small block in your own
-config, below. Then restart `dsh web` again, and the agent remembers.
-
-The install ships **switched off on purpose**: until you add that block,
-the agent gets nothing. What you enable, and where, is your call.
-
-**To uninstall later:** `dsh plugin --profile web remove
-dsh-plugin-hindsight-advanced`, remove your config block, restart `dsh
-web`. Your memories stay on the Hindsight server.
+Then restart the server.
 
 ## Configuration
 
@@ -132,7 +93,3 @@ version: 1
 refs:
   HINDSIGHT_API_KEY: <the Hindsight server's token>
 ```
-
-(Or export `HINDSIGHT_API_KEY` in the environment that starts `dsh web`.)
-Because the lookup happens on every call, editing the file — or rotating
-the token in place — takes effect immediately, with no restart.
