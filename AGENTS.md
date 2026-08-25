@@ -8,8 +8,9 @@ developing it.**
 
 A userland DeepSeek Harness (DSH) profile bundle that mounts Hindsight
 long-term memory for a DSH profile: one `hindsight` tool (retain / recall /
-reflect / invalidate) plus automatic per-turn recall, against a Hindsight
-bank. **No DSH
+reflect / invalidate) plus automatic per-turn recall (prefetched in the
+background at turn-stop, consumed at the next turn's first step), against
+a Hindsight bank. **No DSH
 source modifications, ever** — the whole surface is one entry file plus a
 small tree of dependency-light ESM TypeScript modules in `src/`, resolved
 from the DSH checkout through the `node_modules` symlink in this directory.
@@ -51,8 +52,11 @@ tree — preserve them when you change anything:
    contained, logged, and never propagated into the agent loop.
 6. **The model's context is an append-only surface.** The auto-recall
    snapshot is only ever appended — the plugin never replaces or erases a
-   previous turn's snapshot. An identical recall is not re-committed (no
-   churn); an empty recall leaves existing snapshots in place. Rewriting
+   previous turn's snapshot. An identical recall re-commits no duplicate
+   block (no churn) — the turn instead gets a marker row
+   (`renderUnchanged`) naming the applied memories one compact line each,
+   so the UI still shows exactly what memory was applied that turn; an
+   empty recall leaves existing snapshots in place. Rewriting
    earlier turns (tombstones / `latestOnly`) was tried and rejected — do
    not resurrect it.
 7. **The tool description IS the retention policy.** WHAT and WHEN the model
@@ -64,7 +68,15 @@ tree — preserve them when you change anything:
 8. **KV cache is a first-class concern.** Automatic recall runs once per
    turn (the first step only), is bounded, and subagent sessions are
    skipped — so a memory server's latency or outage is never paid in the
-   agent loop, and stable prefixes are not invalidated per step.
+   agent loop, and stable prefixes are not invalidated per step. The
+   lookup itself is started ahead of the turn that pays for it: the
+   `agent/turn-stopping` listener fires a detached recall job (never
+   awaited — that event is serial and awaited at the boundary) that runs
+   in the user's think time, and the next first step consumes the cached
+   result. From the second turn on the snapshot therefore targets the
+   PREVIOUS turn's message (the same trade the Hermes integration ships as
+   its default); the first turn, and any turn whose job failed or was not
+   ready in time, take the original bounded synchronous path.
 9. **Secrets are references, never values.** The row carries
    `apiKeyRef` (a POSIX identifier), resolved **per call** through the
    credentials seam (env → `~/.dsh/.credentials.yaml` → `.env`, most
@@ -84,18 +96,18 @@ tree — preserve them when you change anything:
 
 | file | role |
 | --- | --- |
-| `hindsight-advanced.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + pre-step listener |
+| `hindsight-advanced.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + the three auto-recall listeners (pre-step, turn-stopping, disposed) |
 | `src/types.ts` | shared shapes (`RecallHit`, `RecallOptions`) |
 | `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
 | `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
 | `src/client.ts` | the REST transport: one bounded call, one clean bounded error shape |
 | `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`invalidate`/`listDirectives`/`retainDirective` operations — **the extension point for new Hindsight operations** |
-| `src/snapshot.ts` | auto-recall surface logic: query derivation, hit + standing-rules rendering (hits carry their ids; observation hits carry their source facts as `from:` lines — each with the backing fact's id, the curatable handle), identical-recall snapshot lookup |
+| `src/snapshot.ts` | auto-recall surface logic: query derivation (from the step's messages, and from the session's durable log for the turn-stop prefetch — human `user/message` events only, so plugin snapshots are never queries), hit + standing-rules rendering (hits carry their ids; observation hits carry their source facts as `from:` lines — each with the backing fact's id, the curatable handle), the unchanged-recall marker (the applied memories, one compact line each), and the retained-snapshot lookup (an unchanged recall commits the marker instead of a duplicate block) |
 | `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
-| `src/autorecall.ts` | the `agent/pre-step` listener (bounded lookup + surface commit) |
+| `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup) + surface commit, and `agent/disposed` cleanup |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 36 checks, eight mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation, including derived-observation curation: only the backing fact on the `from:` line is curatable) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 37 checks, nine mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation, including derived-observation curation: only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, disposal cleanup) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |
@@ -113,7 +125,7 @@ TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
 
-# the stub suite (36 checks)
+# the stub suite (37 checks)
 cd test && node --import ./register.mjs test.mjs
 
 # preset-mount verification (the custom agent preset row)

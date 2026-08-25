@@ -14,7 +14,16 @@
 // recall surface),
 // and the automatic pre-step recall: snapshot rows ride the pre-step
 // decision (landing AFTER the triggering message) and are only ever
-// appended — the plugin never replaces or erases a previous snapshot.
+// appended — the plugin never replaces or erases a previous snapshot;
+// an unchanged recall commits a marker row — naming the applied memories
+// one compact line each — instead of a duplicate block, so every applied
+// recall has a visible row.
+// The recall starts AHEAD of the turn that pays for it (the turn-stopping
+// prefetch): the detached job queries the turn's own human message while
+// the user is reading or typing, the next step consumes the cache with no
+// bank call, a failed or too-slow job falls back to the original bounded
+// synchronous path, subagent turns never prefetch, and disposal clears the
+// slot.
 import assert from 'node:assert/strict'
 import { start, state } from './stub-server.mjs'
 
@@ -343,18 +352,23 @@ async function runStep(listener, a, step, messages) {
   assert.match(derivedSnapshots(agent.session).at(-1).content[0].text, /Node 22/, 'the last snapshot remains in context')
   console.log('ok  mount A: an empty recall leaves the existing snapshots in place')
 
-  // Unchanged snapshot: identical hits are not re-committed (no churn, no
-  // duplicate row) — the still-accurate snapshot stays where it is.
+  // Unchanged snapshot: the duplicate block is not re-committed (no
+  // churn) — but the turn still gets its row, the marker, naming the
+  // applied memories one line each, so the UI shows what was applied
+  // here and nothing looks skipped.
   const snapsUnchanged = snapshots(agent.session).length
   const d4unchanged = await runStep(listener, agent, 1, [userMsg('which node runtime does the demo build use?')])
-  assert.equal(d4unchanged.messages.length, 1, 'an unchanged recall appends no row')
-  assert.equal(snapshots(agent.session).length, snapsUnchanged, 'an unchanged snapshot is not re-committed')
-  console.log('ok  mount A: an unchanged snapshot is not re-committed')
+  assert.equal(d4unchanged.messages.length, 2, 'an unchanged recall appends the marker row')
+  assert.match(d4unchanged.messages.at(-1).content[0].text, /no new memories this turn/, 'the marker says the earlier snapshot stands')
+  assert.match(d4unchanged.messages.at(-1).content[0].text, /- The demo build runs on Node 22\./, 'the marker names the applied memory')
+  const afterMarker = snapshots(agent.session).length
+  assert.equal(afterMarker, snapsUnchanged + 1, 'one marker row, no duplicate block')
+  console.log('ok  mount A: an unchanged recall commits a marker naming the applied memories, not a duplicate block')
 
   // step 2 and subagents pass through unchanged, without committing snapshots
   const d4 = await runStep(listener, agent, 2, [userMsg('steering mid-turn')])
   assert.equal(d4.messages.length, 1)
-  assert.equal(snapshots(agent.session).length, snapsUnchanged, 'step 2 commits no snapshot')
+  assert.equal(snapshots(agent.session).length, afterMarker, 'step 2 commits no snapshot')
   const d5 = await runStep(listener, subagent, 1, [userMsg('subagent work')])
   assert.equal(d5.messages.length, 1)
   assert.equal(snapshots(subagent.session).length, 0, 'subagents get no snapshot')
@@ -702,6 +716,160 @@ async function runStep(listener, a, step, messages) {
   assert.match(afterObs, /billing service language is Go\. \(observation\) id:/, 'the observation still surfaces')
   assert.doesNotMatch(afterObs, /from:/, '... but its from line is gone')
   console.log('ok  mount H: invalidating the backing fact prunes the from line, the observation stays')
+}
+
+// ── mount I: the turn-stop prefetch — the recall runs in the user's think time ──
+{
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch' })
+  const preStep = ctx.listeners[0].fn
+  const turnStopping = ctx.listeners[1].fn
+  const tool = ctx.tools.registered[0]
+  assert.deepEqual(
+    ctx.listeners.map(entry => entry.event),
+    ['agent/pre-step', 'agent/turn-stopping', 'agent/disposed'],
+    'the mount registers pre-step (consumer), turn-stopping (producer), disposed (cleanup)',
+  )
+  assert.deepEqual(ctx.listeners[0].options, { prepend: true })
+
+  const alice = { session: makeSession('sess-p1', { agentPreset: 'standard' }) }
+  const recallPath = '/v1/default/banks/prefetch/memories/recall'
+  const recallCount = () => state.requests.filter(request => request.path === recallPath).length
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+  const waitFor = async (predicate, ms = 1000) => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await sleep(5)
+    }
+    return predicate()
+  }
+
+  // Turn 1 has no cache yet: the original bounded synchronous path. The
+  // bank is held slow for a moment so the turn-stopping job's recall
+  // lands AFTER the extra retain below — the cached snapshot then differs
+  // from turn 1's and commits on turn 2 instead of skipping as identical.
+  await tool.execute({ action: 'retain', text: 'The project uses a Postgres database.' }, { signal: baseSignal })
+  state.recallDelayMs = 60
+  await runStep(preStep, alice, 1, [userMsg('which database does the project use')])
+  assert.equal(recallCount(), 1, 'turn 1 takes the synchronous path (no slot yet)')
+  const first = snapshots(alice.session).at(-1)
+  assert.ok(first, 'turn 1 commits a snapshot')
+  assert.doesNotMatch(first.data.content[0].text, /managed/, 'turn 1 saw only the first memory')
+
+  // Turn stop: the detached job starts for the turn's own message. The
+  // event is awaited at the boundary, so the listener must return at once.
+  assert.equal(
+    turnStopping({ agent: alice, turn: 1, signal: baseSignal }),
+    undefined,
+    'turn-stopping returns immediately (the job is detached)',
+  )
+
+  // While the job's recall is held (60 ms) an extra retain lands in the
+  // bank — the job sees it when its response releases.
+  await tool.execute({ action: 'retain', text: 'The project database runs on managed Postgres.' }, { signal: baseSignal })
+  assert.ok(await waitFor(() => recallCount() === 2), 'the detached job issued its recall')
+  assert.equal(
+    state.requests.filter(request => request.path === recallPath).at(-1).body.query,
+    'which database does the project use',
+    'the job queried the turn\'s own human message (snapshots are not queries)',
+  )
+
+  // Turn 2 consumes the cache: no bank call at the step, and the cached
+  // result commits a snapshot (its view of the bank differs from turn 1's).
+  const before = recallCount()
+  await runStep(preStep, alice, 1, [userMsg('how is the database hosted?')])
+  assert.equal(recallCount(), before, 'turn 2\'s step issued no bank call')
+  const second = snapshots(alice.session).at(-1)
+  assert.ok(second, 'turn 2 commits a snapshot from the cache')
+  assert.match(second.data.content[0].text, /managed Postgres/, 'the cached snapshot carries the job\'s view of the bank')
+  state.recallDelayMs = 0
+
+  // An unchanged cached recall commits no duplicate block (no churn): the
+  // job for turn 2's message matches the same two memories, so the
+  // rendering is identical to the snapshot just committed — the step
+  // commits the marker row instead, and still makes no bank call.
+  assert.equal(turnStopping({ agent: alice, turn: 2, signal: baseSignal }), undefined)
+  assert.ok(await waitFor(() => recallCount() === before + 1), 'the turn-2 job issued its recall')
+  const snapshotCount = snapshots(alice.session).length
+  const turn3 = await runStep(preStep, alice, 1, [userMsg('and anything else about the database?')])
+  assert.equal(turn3.messages.length, 2, 'the unchanged turn appends the marker row')
+  assert.match(turn3.messages.at(-1).content[0].text, /no new memories this turn/, 'the marker says the earlier snapshot stands')
+  assert.match(turn3.messages.at(-1).content[0].text, /- The project database runs on managed Postgres\./, 'the marker names the applied memories')
+  assert.equal(snapshots(alice.session).length, snapshotCount + 1, 'one marker row, no duplicate block')
+  assert.equal(recallCount(), before + 1, 'and the step issued no bank call')
+
+  // A bank slower than the budget: the cached job is not ready in time, so
+  // the step discards it and proceeds without memory — the same cost as a
+  // slow server on the synchronous path, minus the attempt that already ran.
+  const ctxSlow = makeCtx()
+  plugin.apply(ctxSlow, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-slow', autoContextTimeoutMs: 120 })
+  const preStepSlow = ctxSlow.listeners[0].fn
+  const turnStoppingSlow = ctxSlow.listeners[1].fn
+  const dave = { session: makeSession('sess-p5', { agentPreset: 'standard' }) }
+  const slowRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/prefetch-slow/memories/recall').length
+  state.recallDelayMs = 2000
+  await runStep(preStepSlow, dave, 1, [userMsg('hello zzzz')])
+  assert.equal(slowRecalls(), 1, 'turn 1\'s synchronous lookup hit the budget (no snapshot)')
+  assert.equal(snapshots(dave.session).length, 0)
+  turnStoppingSlow({ agent: dave, turn: 1, signal: baseSignal })
+  assert.ok(await waitFor(() => slowRecalls() === 2), 'the job\'s recall is in flight (held)')
+  await runStep(preStepSlow, dave, 1, [userMsg('second turn yyy')])
+  assert.equal(slowRecalls(), 2, 'turn 2\'s step issued no new request (the job is still held)')
+  assert.equal(snapshots(dave.session).length, 0, '...and no snapshot: not ready in time, discarded')
+  state.recallDelayMs = 0
+
+  // A failed job deletes its own slot: the next step falls back to a fresh
+  // bounded synchronous lookup — and the failure stays contained.
+  const ctx2 = makeCtx()
+  plugin.apply(ctx2, { ...standard.value, baseUrl: stubUrl, bank: 'broken' })
+  const preStep2 = ctx2.listeners[0].fn
+  const turnStopping2 = ctx2.listeners[1].fn
+  const bob = { session: makeSession('sess-p2') }
+  const brokenRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/broken/memories/recall').length
+  await runStep(preStep2, bob, 1, [userMsg('anything at all')])
+  assert.equal(brokenRecalls(), 1, 'turn 1 tried (and failed) the synchronous lookup')
+  assert.equal(snapshots(bob.session).length, 0)
+  turnStopping2({ agent: bob, turn: 1, signal: baseSignal })
+  assert.ok(await waitFor(() => brokenRecalls() === 2), 'the job tried (and failed) too')
+  await runStep(preStep2, bob, 1, [userMsg('the next turn now')])
+  assert.equal(brokenRecalls(), 3, 'the failed job left no slot: turn 2 took a FRESH synchronous lookup')
+  assert.equal(snapshots(bob.session).length, 0, '...and the failure stayed contained (no snapshot, no crash)')
+
+  // Subagent turns never start a prefetch (auto-recall stays skipped there).
+  const ctx3 = makeCtx()
+  plugin.apply(ctx3, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-sub' })
+  const turnStopping3 = ctx3.listeners[1].fn
+  const child = { session: makeSession('sess-p3', { origin: 'subagent', agentPreset: 'standard' }) }
+  child.session.append('user/message', userMsg('subagent task'), { surfaceOp: 'append' })
+  assert.equal(turnStopping3({ agent: child, turn: 1, signal: baseSignal }), undefined)
+  await sleep(50)
+  assert.equal(
+    state.requests.filter(request => request.path.includes('/banks/prefetch-sub/')).length,
+    0,
+    'no prefetch request for a subagent session',
+  )
+
+  // Disposal clears the slot: the next step takes the synchronous path.
+  const ctx4 = makeCtx()
+  plugin.apply(ctx4, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-discard' })
+  const preStep4 = ctx4.listeners[0].fn
+  const turnStopping4 = ctx4.listeners[1].fn
+  const disposed = ctx4.listeners[2].fn
+  const carol = { session: makeSession('sess-p4', { agentPreset: 'standard' }) }
+  const discardRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/prefetch-discard/memories/recall').length
+  await ctx4.tools.registered[0].execute({ action: 'retain', text: 'The project uses a Postgres database.' }, { signal: baseSignal })
+  await runStep(preStep4, carol, 1, [userMsg('nothing to see here')])
+  assert.equal(discardRecalls(), 1, 'turn 1\'s synchronous lookup (no match, no snapshot)')
+  assert.equal(snapshots(carol.session).length, 0)
+  turnStopping4({ agent: carol, turn: 1, signal: baseSignal })
+  assert.ok(await waitFor(() => discardRecalls() === 2), 'the job ran for the empty turn')
+  disposed({ agent: carol })
+  await runStep(preStep4, carol, 1, [userMsg('which database does the project use')])
+  assert.equal(discardRecalls(), 3, 'the slot was cleared: turn 2 took a fresh synchronous lookup')
+  const carolSnap = snapshots(carol.session).at(-1)
+  assert.ok(carolSnap && carolSnap.data.content[0].text.includes('Postgres database'), 'the fresh lookup committed a snapshot')
+  console.log('ok  mount I: turn-stop prefetch — cached consumption without a bank call, the job queries the turn\'s own human message, an unchanged recall commits a marker row, a too-slow job is discarded, a failed job falls back, subagents never prefetch, disposal clears the slot')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

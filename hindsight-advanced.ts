@@ -55,18 +55,30 @@
  *     bank soft-retires it — excluded from recall and consolidation,
  *     archived, reversible server-side — so a corrected belief stops
  *     competing with the stale one in every future recall.
- * - automatic recall: on the first step of each turn the latest user message
- *   is queried and the bank's active standing directives are listed, and
- *   both become a plugin-sourced snapshot message (the same pattern
- *   `time-context` uses for the clock). The lookups share one bounded budget
- *   and subagent sessions are skipped, so a slow or stopped Hindsight server
- *   never blocks a turn.
+ * - automatic recall: the first step of each turn commits a plugin-sourced
+ *   snapshot message into the model context (the same pattern
+ *   `time-context` uses for the clock), carrying the bank's active standing
+ *   directives in their own section. The recall for it starts AHEAD of the
+ *   turn that pays for it: when a turn stops (no live tool calls, no fresh
+ *   steering) a detached job runs the recall for that turn's own message —
+ *   while the user is reading or typing the next one — and the next turn
+ *   consumes the cached result without a bank call. The trade (the same
+ *   one the Hermes integration ships as its default): from the second turn
+ *   on the snapshot targets the PREVIOUS turn's message — the current
+ *   message is already in the model context, and the memory layer is
+ *   durable knowledge. The first turn, and any turn whose job failed, take
+ *   the original bounded synchronous path (the lookups share one bounded
+ *   budget). Subagent sessions are skipped, so a slow or stopped Hindsight
+ *   server never blocks a turn.
  *
  *   The snapshot is only ever appended — the plugin never replaces or
  *   erases a previous turn's snapshot — so the model context accumulates one
  *   snapshot per distinct turn, while the durable log keeps every snapshot
- *   for replay and audit. An identical recall is not re-committed (no
- *   churn); an empty recall leaves the existing snapshots in place.
+ *   for replay and audit. An identical recall re-commits no duplicate
+ *   block (no churn) — the turn instead gets a marker row naming the
+ *   applied memories (one compact line each), so the UI still shows
+ *   exactly what memory was applied that turn; an empty recall leaves the
+ *   existing snapshots in place.
  *
  * Visibility tiers (the plugin's tag model — the model never sees tags):
  * the plugin tags every stored memory with at most ONE tier's tag, and the
@@ -119,8 +131,9 @@
  *   next operation retries the sync).
  *
  * The plugin provides no service of its own (it registers into the tools
- * registry and listens on `agent/pre-step`), so its preset row needs no
- * isolate realm — the same as the preset's other tool rows.
+ * registry and listens on `agent/pre-step`, `agent/turn-stopping`, and
+ * `agent/disposed`), so its preset row needs no isolate realm — the same
+ * as the preset's other tool rows.
  *
  * Code layout: this file is the entry the loader imports (the Plugin.Object
  * contract: `name`/`inject`/`Config`/`apply`); `src/` holds the modules —
@@ -128,7 +141,7 @@
  * Standard-Schema validator), `client` (the REST transport), `bank` (the
  * per-mount factory and its operations), `snapshot` (auto-recall surface
  * logic), `tool` (the model-facing tool), `autorecall` (the pre-step
- * listener).
+ * consumer + turn-stopping prefetch + disposal cleanup).
  *
  * @module dsh-plugin-hindsight-advanced
  */
@@ -188,7 +201,14 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   /** One mount: the bank's operations and its per-mount state. */
   const mount = createMount(config, buildResolveApiKey(ctx, config))
 
-  ctx.on('agent/pre-step', buildAutoRecall(mount, name), { prepend: true })
+  // One mount owns all three auto-recall listeners: pre-step consumes the
+  // slot, turn-stopping fills it, disposal clears it — the slot map lives
+  // in the closure they share.
+  const autoRecall = buildAutoRecall(mount, name)
+
+  ctx.on('agent/pre-step', autoRecall.preStep, { prepend: true })
+  ctx.on('agent/turn-stopping', autoRecall.turnStopping)
+  ctx.on('agent/disposed', autoRecall.disposed)
 
   ctx.tools.register(buildTool(mount))
 }

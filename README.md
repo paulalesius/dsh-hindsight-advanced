@@ -76,9 +76,23 @@ Two things to know about the row:
 | `autoContext` | `true` | Set `false` to turn off the automatic per-turn recall (the `hindsight` tool stays). |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `1024` | How much memory to bring back per recall. |
-| `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. A slow or stopped server never blocks the agent. |
+| `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. Because the lookup runs ahead (below), most turns never pay this; a slow or stopped server never blocks the agent. |
 | `retainAsync` | `false` | `false` (the default): storing waits until the bank has processed the memory, so the next turn already sees it. `true`: store acknowledges fast and the bank processes it in the background. |
 | `bankConfig` | — | Optional instructions for the *server's* own memory extraction — for example `retain_mission: "Focus on decisions and durable project facts."` tells the Hindsight server what to pull out of what the agent stores. |
+
+### How the automatic recall works
+
+At the start of each turn the agent gets a small note: the memories that
+match your latest message, plus any standing rules you stored. The lookup
+starts in the background as soon as the *previous* turn ends — while you
+are reading or typing — so by the time the agent starts the next turn the
+memory is usually already there and the turn does not wait on the memory
+server at all. The first turn of a conversation has nothing to read ahead
+of, so it waits on the server normally (up to `autoContextTimeoutMs`).
+When a turn's recall matches nothing new, you get a
+"no new memories this turn" row instead of a repeated block: it names
+the memories still in effect, one line each, so you can see exactly what
+was applied without the whole block repeating.
 
 ### Giving the plugin its key
 

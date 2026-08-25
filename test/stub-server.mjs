@@ -9,6 +9,10 @@ export const state = {
   requests: [],
   nextId: 1,
   bankConfigs: {},
+  // when > 0, recall responses are held this many ms before sending —
+  // models a slow bank (the prefetch budget and the synchronous fallback
+  // both depend on it).
+  recallDelayMs: 0,
 }
 
 const server = http.createServer((req, res) => {
@@ -54,7 +58,15 @@ const server = http.createServer((req, res) => {
       return json(200, { success: true, bank_id: bank, items_count: items.length, async: Boolean(data.async) })
     }
     if (req.method === 'POST' && rest[0] === 'memories' && rest[1] === 'recall') {
-      // recall
+      // recall. A configured delay models a slow bank (the request is
+      // logged NOW; the response is held).
+      const respond = () => handleRecall(bank, data, json)
+      if (state.recallDelayMs > 0) return setTimeout(respond, state.recallDelayMs)
+      return respond()
+    }
+    function handleRecall(bank, data, json) {
+      // the 'broken' bank always fails recall (the failed-prefetch check)
+      if (bank === 'broken') return json(500, { error: 'stub: broken bank' })
       let hits = state.memories.filter(memory => memory.bank === bank && !memory.invalidated)
       if (Array.isArray(data.tags) && data.tags.length > 0) {
         const strict = String(data.tags_match ?? 'any').endsWith('_strict')
