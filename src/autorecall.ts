@@ -25,7 +25,10 @@
  * turn's message, not the current one — the current message is already in
  * the model context, and the memory layer is durable knowledge. The first
  * turn has no cache and takes the original bounded synchronous path, as
- * does any turn whose job failed.
+ * does any turn whose job failed. `prefetch: false` (config) turns the
+ * job off entirely: every turn takes the synchronous path, and the
+ * snapshot targets the CURRENT message — at the cost of the bank's
+ * latency on the turn's first model call.
  *
  * The plugin only ever APPENDS a snapshot; it never replaces or erases a
  * previous turn's snapshot, so the model context accumulates one snapshot
@@ -115,7 +118,8 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  * - `preStep` (registered with `{ prepend: true }`) — consumes the previous
  *   turn's cached prefetch if it is ready, else takes the original bounded
  *   synchronous path, and commits the snapshot onto the step-1 decision;
- * - `turnStopping` — starts the detached prefetch for the closing turn;
+ * - `turnStopping` — starts the detached prefetch for the closing turn
+ *   (only while `prefetch` is on);
  * - `disposed` — aborts and drops the session's slot.
  *
  * At most one live slot per session: created at turn-stopping, consumed or
@@ -269,7 +273,9 @@ export function buildAutoRecall(
 
   const turnStopping = ({ agent, signal }: TurnStoppingPayload): void => {
     const session = agent.session
-    if (signal.aborted || !config.autoContext) return
+    // `prefetch: false` — no job: the recall waits for the next message
+    // (the synchronous path) instead of reading this turn ahead.
+    if (signal.aborted || !config.autoContext || !config.prefetch) return
     if (session.header?.origin === 'subagent') return
     // Never awaited: the event is serial and the loop awaits it before the
     // turn boundary commits — the job runs detached, in the user's think

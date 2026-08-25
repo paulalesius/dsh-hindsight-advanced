@@ -74,6 +74,7 @@ Two things to know about the row:
 | `apiKeyRef` | — | **The way to give the plugin its key** — a *name* for the secret, not the secret itself. The value is looked up on every call (environment → `~/.dsh/.credentials.yaml` → `.env` files), so rotating the key needs no restart and the key never sits in a config file. See below. |
 | `apiKey` | — | A plain key in the config, instead of a reference. Prefer `apiKeyRef`. |
 | `autoContext` | `true` | Set `false` to turn off the automatic per-turn recall (the `hindsight` tool stays). |
+| `prefetch` | `true` | `true` (default): the recall starts as the *previous* turn ends, so from the second turn on it targets the previous message. `false`: every turn queries the message you just sent and waits on the server for it — the memory is always relevant to what you just said, at the cost of the server's latency on every first model call. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `1024` | How much memory to bring back per recall. |
 | `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. Because the lookup runs ahead (below), most turns never pay this; a slow or stopped server never blocks the agent. |
@@ -89,6 +90,8 @@ are reading or typing — so by the time the agent starts the next turn the
 memory is usually already there and the turn does not wait on the memory
 server at all. The first turn of a conversation has nothing to read ahead
 of, so it waits on the server normally (up to `autoContextTimeoutMs`).
+Set `prefetch: false` to query the message you just sent instead — at the
+cost of that wait on every turn.
 When a turn's recall matches nothing new, you get a
 "no new memories this turn" row instead of a repeated block: it names
 the memories still in effect, one line each, so you can see exactly what

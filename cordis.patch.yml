@@ -42,6 +42,12 @@
         # hindsight tool stays, the automatic recall goes.
         autoContext: true
 
+        # true — the recall starts as the previous turn ends (in your think
+        # time); from the second turn on it targets the previous message.
+        # false — every turn queries the message you just sent and waits on
+        # the server for it (up to autoContextTimeoutMs).
+        prefetch: true
+
         # false — retain waits for the bank to process the memory, so the very
         # next recall already sees it. true — fast ack, background extraction.
         retainAsync: false

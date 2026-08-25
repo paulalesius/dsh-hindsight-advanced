@@ -22,8 +22,9 @@
 // prefetch): the detached job queries the turn's own human message while
 // the user is reading or typing, the next step consumes the cache with no
 // bank call, a failed or too-slow job falls back to the original bounded
-// synchronous path, subagent turns never prefetch, and disposal clears the
-// slot.
+// synchronous path, subagent turns never prefetch, prefetch: false gates
+// the job off (every turn queries its current message synchronously), and
+// disposal clears the slot.
 import assert from 'node:assert/strict'
 import { start, state } from './stub-server.mjs'
 
@@ -50,6 +51,7 @@ assert.deepEqual(standard.value, {
   bank: 'hermes',
   baseUrl: 'http://127.0.0.1:8888',
   autoContext: true,
+  prefetch: true,
   retainAsync: false,
   maxRecallTokens: 1024,
   autoContextTimeoutMs: 2500,
@@ -69,6 +71,14 @@ assert.ok('issues' in badScope && badScope.issues.some(issue => issue.path?.[0] 
 const asyncMount = validate({ bank: 'x', retainAsync: true })
 assert.ok('value' in asyncMount, JSON.stringify(asyncMount))
 assert.equal(asyncMount.value.retainAsync, true)
+
+// prefetch: on by default (the recall reads the previous turn ahead);
+// opt-out + validation
+const noPrefetch = validate({ bank: 'x', prefetch: false })
+assert.ok('value' in noPrefetch, JSON.stringify(noPrefetch))
+assert.equal(noPrefetch.value.prefetch, false)
+const badPrefetch = validate({ bank: 'x', prefetch: 'yes' })
+assert.ok('issues' in badPrefetch && badPrefetch.issues.some(issue => issue.path?.[0] === 'prefetch'), JSON.stringify(badPrefetch))
 
 // bank is required
 const none = validate({})
@@ -850,6 +860,33 @@ async function runStep(listener, a, step, messages) {
     'no prefetch request for a subagent session',
   )
 
+  // prefetch: false — the gate: no job ever starts, and every turn takes
+  // the synchronous path, whose query is the CURRENT message.
+  const ctx5 = makeCtx()
+  plugin.apply(ctx5, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-off', prefetch: false })
+  const preStep5 = ctx5.listeners[0].fn
+  const turnStopping5 = ctx5.listeners[1].fn
+  const erin = { session: makeSession('sess-p6', { agentPreset: 'standard' }) }
+  const offRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/prefetch-off/memories/recall').length
+  await ctx5.tools.registered[0].execute({ action: 'retain', text: 'The project uses a Postgres database.' }, { signal: baseSignal })
+  await runStep(preStep5, erin, 1, [userMsg('first question about the database')])
+  assert.equal(offRecalls(), 1, 'turn 1 takes the synchronous path')
+  assert.equal(
+    state.requests.filter(request => request.path === '/v1/default/banks/prefetch-off/memories/recall').at(-1).body.query,
+    'first question about the database',
+    'the synchronous query is the CURRENT message',
+  )
+  assert.equal(turnStopping5({ agent: erin, turn: 1, signal: baseSignal }), undefined)
+  await sleep(50)
+  assert.equal(offRecalls(), 1, 'prefetch: false starts no turn-stop job')
+  await runStep(preStep5, erin, 1, [userMsg('second question about the database')])
+  assert.equal(offRecalls(), 2, 'turn 2 takes a fresh synchronous lookup (no slot was left)')
+  assert.equal(
+    state.requests.filter(request => request.path === '/v1/default/banks/prefetch-off/memories/recall').at(-1).body.query,
+    'second question about the database',
+    '...querying its own current message',
+  )
+
   // Disposal clears the slot: the next step takes the synchronous path.
   const ctx4 = makeCtx()
   plugin.apply(ctx4, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-discard' })
@@ -869,7 +906,7 @@ async function runStep(listener, a, step, messages) {
   assert.equal(discardRecalls(), 3, 'the slot was cleared: turn 2 took a fresh synchronous lookup')
   const carolSnap = snapshots(carol.session).at(-1)
   assert.ok(carolSnap && carolSnap.data.content[0].text.includes('Postgres database'), 'the fresh lookup committed a snapshot')
-  console.log('ok  mount I: turn-stop prefetch — cached consumption without a bank call, the job queries the turn\'s own human message, an unchanged recall commits a marker row, a too-slow job is discarded, a failed job falls back, subagents never prefetch, disposal clears the slot')
+  console.log('ok  mount I: turn-stop prefetch — cached consumption without a bank call, the job queries the turn\'s own human message, an unchanged recall commits a marker row, a too-slow job is discarded, a failed job falls back, subagents never prefetch, prefetch: false gates the job off, disposal clears the slot')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

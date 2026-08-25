@@ -76,7 +76,11 @@ tree — preserve them when you change anything:
    result. From the second turn on the snapshot therefore targets the
    PREVIOUS turn's message (the same trade the Hermes integration ships as
    its default); the first turn, and any turn whose job failed or was not
-   ready in time, take the original bounded synchronous path.
+   ready in time, take the original bounded synchronous path. The `prefetch`
+   config key (default `true`) gates the job: `false` disables it, so
+   every turn queries the CURRENT message on the synchronous path —
+   relevance to what you just said, at the cost of bank latency on the
+   first model call.
 9. **Secrets are references, never values.** The row carries
    `apiKeyRef` (a POSIX identifier), resolved **per call** through the
    credentials seam (env → `~/.dsh/.credentials.yaml` → `.env`, most
@@ -107,7 +111,7 @@ tree — preserve them when you change anything:
 | `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup) + surface commit, and `agent/disposed` cleanup |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 37 checks, nine mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation, including derived-observation curation: only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, disposal cleanup) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 37 checks, nine mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation, including derived-observation curation: only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |

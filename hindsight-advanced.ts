@@ -113,6 +113,12 @@
  *   secret and a rotation needs no restart. Mutually exclusive with `apiKey`.
  * - `autoContext` — default `true`; `false` disables the per-turn recall
  *   (the tool stays available).
+ * - `prefetch` — default `true`: the recall starts ahead of the turn that
+ *   pays for it, so from the second turn on the snapshot targets the
+ *   PREVIOUS message. `false`: no job, every turn waits on the server
+ *   (up to `autoContextTimeoutMs`) and the snapshot targets the CURRENT
+ *   message — relevant to what you just said, at the cost of bank
+ *   latency on every first model call.
  * - `retainAsync` — default `false` (synchronous: the retain call waits for
  *   the bank to process the memory); `true` acknowledges fast and runs fact
  *   extraction in the background.

@@ -22,6 +22,12 @@ export interface ResolvedConfig {
   apiKeyRef?: string
   /** The per-turn automatic recall is active. */
   autoContext: boolean
+  /** `true` (default): the recall starts AHEAD of the turn that pays for
+   *  it (the `agent/turn-stopping` job), so from the second turn on the
+   *  snapshot targets the PREVIOUS turn's message. `false`: no job starts;
+   *  every turn takes the bounded synchronous path, whose query is the
+   *  message that just arrived (the turn waits on the server for it). */
+  prefetch: boolean
   /** `true`: retain acknowledges fast and runs fact extraction in the
    *  background; `false` (default): the retain call waits for the bank to
    *  process the memory before returning. */
@@ -191,6 +197,7 @@ export const Config: {
         ...(apiKeyRef !== undefined ? { apiKeyRef } : {}),
         ...(bankConfig !== undefined ? { bankConfig } : {}),
         autoContext: boolFlag(record, 'autoContext', true, issues),
+        prefetch: boolFlag(record, 'prefetch', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),
         autoContextTimeoutMs: intFlag(record, 'autoContextTimeoutMs', DEFAULT_AUTO_CONTEXT_TIMEOUT_MS, issues),
