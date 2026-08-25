@@ -12,6 +12,12 @@
 // plus curation: invalidating a memory the model has shown to be wrong or
 // stale (a soft PATCH with a recorded reason; the retired memory leaves the
 // recall surface),
+// plus the automatic recall's query composition (recallContextTurns,
+// default 5): the anchor message under a `Prior context:` block of the
+// recent prior turns (one line per user / assistant message), capped at
+// 1000 chars with the oldest lines dropping first — on BOTH the
+// synchronous path (the anchor not on the log yet) and the prefetch
+// (the anchor's own turn composed in, its own line dropped),
 // and the automatic pre-step recall: snapshot rows ride the pre-step
 // decision (landing AFTER the triggering message) and are only ever
 // appended — the plugin never replaces or erases a previous snapshot;
@@ -52,6 +58,7 @@ assert.deepEqual(standard.value, {
   baseUrl: 'http://127.0.0.1:8888',
   autoContext: true,
   prefetch: true,
+  recallContextTurns: 5,
   retainAsync: false,
   maxRecallTokens: 1024,
   autoContextTimeoutMs: 2500,
@@ -79,6 +86,16 @@ assert.ok('value' in noPrefetch, JSON.stringify(noPrefetch))
 assert.equal(noPrefetch.value.prefetch, false)
 const badPrefetch = validate({ bank: 'x', prefetch: 'yes' })
 assert.ok('issues' in badPrefetch && badPrefetch.issues.some(issue => issue.path?.[0] === 'prefetch'), JSON.stringify(badPrefetch))
+
+// recallContextTurns: 5 by default (the reference integrations use 1 — the
+// plugin's `Prior context:` block is a first-class part of the query); validation
+const oneContextTurn = validate({ bank: 'x', recallContextTurns: 1 })
+assert.ok('value' in oneContextTurn, JSON.stringify(oneContextTurn))
+assert.equal(oneContextTurn.value.recallContextTurns, 1)
+const badTurns = validate({ bank: 'x', recallContextTurns: 2.5 })
+assert.ok('issues' in badTurns && badTurns.issues.some(issue => issue.path?.[0] === 'recallContextTurns'), JSON.stringify(badTurns))
+const zeroTurns = validate({ bank: 'x', recallContextTurns: 0 })
+assert.ok('issues' in zeroTurns && zeroTurns.issues.some(issue => issue.path?.[0] === 'recallContextTurns'), JSON.stringify(zeroTurns))
 
 // bank is required
 const none = validate({})
@@ -227,9 +244,14 @@ async function runStep(listener, a, step, messages) {
 }
 
 // ── mount A: bank hermes (what `standard` would mount) ──────────────────────
+// Pinned to recallContextTurns: 1: this mount's automatic-recall checks
+// assert the single-message anchor semantics (exact query, an unrelated
+// message getting an empty recall, an unchanged recall committing the
+// marker) — the multi-turn `Prior context:` composition gets its own
+// mount (J) at the default of 5.
 {
   const ctx = makeCtx()
-  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl })
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, recallContextTurns: 1 })
   assert.equal(ctx.tools.registered.length, 1)
   const tool = ctx.tools.registered[0]
   const listener = ctx.listeners[0].fn
@@ -861,9 +883,11 @@ async function runStep(listener, a, step, messages) {
   )
 
   // prefetch: false — the gate: no job ever starts, and every turn takes
-  // the synchronous path, whose query is the CURRENT message.
+  // the synchronous path, whose query is the CURRENT message (pinned to
+  // recallContextTurns: 1 — this check asserts the single-message query;
+  // the composed one is mount J's territory).
   const ctx5 = makeCtx()
-  plugin.apply(ctx5, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-off', prefetch: false })
+  plugin.apply(ctx5, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-off', prefetch: false, recallContextTurns: 1 })
   const preStep5 = ctx5.listeners[0].fn
   const turnStopping5 = ctx5.listeners[1].fn
   const erin = { session: makeSession('sess-p6', { agentPreset: 'standard' }) }
@@ -907,6 +931,112 @@ async function runStep(listener, a, step, messages) {
   const carolSnap = snapshots(carol.session).at(-1)
   assert.ok(carolSnap && carolSnap.data.content[0].text.includes('Postgres database'), 'the fresh lookup committed a snapshot')
   console.log('ok  mount I: turn-stop prefetch — cached consumption without a bank call, the job queries the turn\'s own human message, an unchanged recall commits a marker row, a too-slow job is discarded, a failed job falls back, subagents never prefetch, prefetch: false gates the job off, disposal clears the slot')
+}
+
+// ── mount J: recallContextTurns (default 5) — the `Prior context:` query ──
+{
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'context' })
+  const listener = ctx.listeners[0].fn
+  const turnStopping = ctx.listeners[1].fn
+  const tool = ctx.tools.registered[0]
+  const recallPath = '/v1/default/banks/context/memories/recall'
+  const recallCount = () => state.requests.filter(request => request.path === recallPath).length
+  const lastQuery = () => state.requests.filter(request => request.path === recallPath).at(-1)?.body.query
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+  const waitFor = async (predicate, ms = 1000) => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await sleep(5)
+    }
+    return predicate()
+  }
+  // The loop never appends assistant rows (the model does, not the test's
+  // stand-in) — seed them the way the durable log carries them.
+  const assistantMsg = (text) => ({ turn: 1, step: 1, message: { id: `a${Math.random()}`, role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model' } } })
+
+  const gracie = { session: makeSession('sess-c1', { agentPreset: 'standard' }) }
+
+  // A memory whose words appear ONLY in the prior context, never in the
+  // anchor — proof that the composed lines are what really gets queried.
+  await tool.execute({ action: 'retain', text: 'The demo build pipeline was retired for CI.' }, { signal: baseSignal })
+
+  // Synchronous path: the anchor is NOT on the log yet (pre-step fires
+  // before the turn's messages are appended), so the log holds the prior
+  // turns only and all of them count toward the window.
+  gracie.session.append('user/message', userMsg('set up the build pipeline'))
+  gracie.session.append('assistant/message', assistantMsg('Done — the pipeline uses Makefile targets.'))
+  gracie.session.append('user/message', userMsg('now add tests for it'))
+  gracie.session.append('assistant/message', assistantMsg('Added the Makefile test targets.'))
+  await runStep(listener, gracie, 1, [userMsg('which cache did the old prototype use')])
+  assert.equal(
+    lastQuery(),
+    'Prior context:\n\n'
+      + 'user: set up the build pipeline\n'
+      + 'assistant: Done — the pipeline uses Makefile targets.\n'
+      + 'user: now add tests for it\n'
+      + 'assistant: Added the Makefile test targets.\n'
+      + '\nwhich cache did the old prototype use',
+    'the synchronous query is the anchor under the prior context',
+  )
+  const gracieSnap = snapshots(gracie.session).at(-1)
+  assert.match(gracieSnap.data.content[0].text, /demo build pipeline/, 'a context-only word ("pipeline") hit the bank through the composed query')
+  console.log('ok  mount J: the synchronous query carries the prior turns under `Prior context:` (default 5)')
+
+  // Prefetch path: the anchor IS the log's last human message — its turn
+  // counts toward the window, its own user line is dropped (it is the tail),
+  // and its assistant reply becomes the newest context line.
+  gracie.session.append('assistant/message', assistantMsg('The old prototype used a Redis cache.'))
+  assert.equal(turnStopping({ agent: gracie, turn: 1, signal: baseSignal }), undefined)
+  assert.ok(await waitFor(() => recallCount() === 2), 'the detached job issued its recall')
+  assert.equal(
+    lastQuery(),
+    'Prior context:\n\n'
+      + 'user: set up the build pipeline\n'
+      + 'assistant: Done — the pipeline uses Makefile targets.\n'
+      + 'user: now add tests for it\n'
+      + 'assistant: Added the Makefile test targets.\n'
+      + 'assistant: The old prototype used a Redis cache.\n'
+      + '\nwhich cache did the old prototype use',
+    'the job anchor keeps its own line out of the context',
+  )
+  console.log('ok  mount J: the prefetch query composes the anchor turn in (its reply is context, its line is not)')
+
+  // The cap: the anchor is kept whole and the OLDEST context line drops
+  // first — here the whole prior user line, keeping only the newer one.
+  const hank = { session: makeSession('sess-c2', { agentPreset: 'standard' }) }
+  const longUser = `context line alpha `.repeat(30).trim()
+  const longAssistant = `context line beta `.repeat(25).trim()
+  hank.session.append('user/message', userMsg(longUser))
+  hank.session.append('assistant/message', assistantMsg(longAssistant))
+  await runStep(listener, hank, 1, [userMsg('final question about the cache')])
+  assert.equal(
+    lastQuery(),
+    `Prior context:\n\nassistant: ${longAssistant}\n\nfinal question about the cache`,
+    'over the cap, the oldest line drops and the anchor stays whole',
+  )
+
+  // If even the newest line alone does not fit, no context survives — the
+  // query falls back to the anchor (capped as before).
+  const ivy = { session: makeSession('sess-c3', { agentPreset: 'standard' }) }
+  ivy.session.append('user/message', userMsg(`huge context `.repeat(120).trim()))
+  await runStep(listener, ivy, 1, [userMsg('one short question')])
+  assert.equal(lastQuery(), 'one short question', 'no context fits under the cap → the anchor alone')
+
+  // recallContextTurns: 1 (the reference default): the single-message
+  // query, even with prior turns on the log.
+  const ctxOne = makeCtx()
+  plugin.apply(ctxOne, { ...standard.value, baseUrl: stubUrl, bank: 'context-one', recallContextTurns: 1 })
+  const judy = { session: makeSession('sess-c4', { agentPreset: 'standard' }) }
+  judy.session.append('user/message', userMsg('set up the build pipeline'))
+  await runStep(ctxOne.listeners[0].fn, judy, 1, [userMsg('one short question')])
+  assert.equal(
+    state.requests.filter(request => request.path === '/v1/default/banks/context-one/memories/recall').at(-1).body.query,
+    'one short question',
+    'recallContextTurns: 1 leaves the single-message query',
+  )
+  console.log('ok  mount J: over the cap the oldest context drops (the anchor stays whole); recallContextTurns: 1 is the single-message query')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

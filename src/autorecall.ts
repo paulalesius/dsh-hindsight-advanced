@@ -47,7 +47,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
-import { findRetainedSnapshots, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderUnchanged } from './snapshot.ts'
+import { composeRecallQuery, findRetainedSnapshots, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderUnchanged } from './snapshot.ts'
 import type { DirectiveRule, RecallHit } from './types.ts'
 
 /** The `agent/pre-step` event payload (the live-runtime event shape). */
@@ -154,8 +154,11 @@ export function buildAutoRecall(
       promise: (async (): Promise<PrefetchedTurn> => {
         // The turn's own message: the last HUMAN message on the durable log
         // (plugin-sourced rows — including this plugin's snapshots — are
-        // user-role messages too and are not queries).
-        const query = queryFromSession(session)
+        // user-role messages too and are not queries), composed with the
+        // recent prior turns as its context (the anchor is on the log, so
+        // its own turn counts toward recallContextTurns).
+        const latest = queryFromSession(session)
+        const query = composeRecallQuery(session, latest, config.recallContextTurns, true)
         // Both lookups run together, like the synchronous path: one result
         // or no result. The job has no turn to serve, so no per-turn
         // budget — only its controller (discards and the TTL) bounds it.
@@ -243,8 +246,11 @@ export function buildAutoRecall(
       return commitSnapshot(decision, session, prefetched?.hits ?? [], prefetched?.rules ?? [])
     }
     // No slot: the first turn, or the previous job failed (its failure
-    // deleted the slot) — the original bounded synchronous path.
-    const query = queryFromMessages(messages)
+    // deleted the slot) — the original bounded synchronous path. The anchor
+    // is not on the log yet (the pre-step fires before the turn's messages
+    // are appended), so the log holds the prior turns only.
+    const latest = queryFromMessages(messages)
+    const query = composeRecallQuery(session, latest, config.recallContextTurns, false)
     // Both lookups ride ONE bounded budget: the shared controller aborts the
     // whole pair at autoContextTimeoutMs (sequential — the directives list
     // is cheap, and the shared timeout still bounds the total).

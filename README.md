@@ -75,6 +75,7 @@ Two things to know about the row:
 | `apiKey` | — | A plain key in the config, instead of a reference. Prefer `apiKeyRef`. |
 | `autoContext` | `true` | Set `false` to turn off the automatic per-turn recall (the `hindsight` tool stays). |
 | `prefetch` | `true` | `true` (default): the recall starts as the *previous* turn ends, so from the second turn on it targets the previous message. `false`: every turn queries the message you just sent and waits on the server for it — the memory is always relevant to what you just said, at the cost of the server's latency on every first model call. |
+| `recallContextTurns` | `5` | How many of your recent turns ride along in the recall's query, so the bank can match memories against what the conversation was about, not just the last message. The query is the anchor message under a `Prior context:` block of the recent prior turns (one line per user/assistant message), capped at 1000 characters with the oldest lines dropped first. `1` (what the reference integrations ship) is the plain single-message query. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `1024` | How much memory to bring back per recall. |
 | `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. Because the lookup runs ahead (below), most turns never pay this; a slow or stopped server never blocks the agent. |
@@ -92,6 +93,11 @@ server at all. The first turn of a conversation has nothing to read ahead
 of, so it waits on the server normally (up to `autoContextTimeoutMs`).
 Set `prefetch: false` to query the message you just sent instead — at the
 cost of that wait on every turn.
+The query is not just that one message: with the default
+`recallContextTurns: 5`, the last few turns of the conversation ride
+along under a `Prior context:` block (one line per message, capped at
+1000 characters), so a memory about the topic you were discussing a turn
+or two back can match — set it to `1` for the plain single-message query.
 When a turn's recall matches nothing new, you get a
 "no new memories this turn" row instead of a repeated block: it names
 the memories still in effect, one line each, so you can see exactly what

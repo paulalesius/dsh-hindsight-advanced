@@ -9,7 +9,7 @@
  * @module dsh-plugin-hindsight-advanced/snapshot
  */
 
-import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
+import type { AssistantMessage, Session, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { DirectiveRule, RecallHit } from './types.ts'
 
@@ -114,6 +114,120 @@ export function queryFromSession(session: Session): string {
     if (text.length > 0) return text.slice(0, MAX_QUERY_CHARS)
   }
   return ''
+}
+
+/** A message's text as ONE query line: the text blocks joined with a space,
+ *  every whitespace run collapsed (a context line must stay one line). */
+function queryLine(message: UserMessage | AssistantMessage): string {
+  if (!Array.isArray(message.content)) return ''
+  return message.content
+    .filter(block => block.type === 'text')
+    .map(block => block.text)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * The last `turns` HUMAN turns on `session`'s durable log, rendered as
+ * context lines, oldest first: one line per message — `user: …` for the
+ * turn's human message and `assistant: …` for each assistant reply in the
+ * turn. A turn starts at a HUMAN `user/message` (the same rule
+ * `queryFromSession` applies — plugin-sourced user-role rows, including
+ * this plugin's own snapshots, are not turns) and runs to the next one.
+ * `dropLastHuman` omits the log's last human message's own line — the
+ * prefetch's anchor, which is the query's tail, not its context (its
+ * assistant replies, which come after it, stay).
+ */
+function contextLines(session: Session, turns: number, dropLastHuman: boolean): string[] {
+  const entries: { role: 'user' | 'assistant'; line: string }[] = []
+  let lastHumanAt = -1
+  const events = session.events
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    if (event.type === 'user/message') {
+      if (event.data.source?.kind !== 'user') continue
+      const line = queryLine(event.data)
+      if (line.length === 0) continue
+      lastHumanAt = entries.length
+      entries.push({ role: 'user', line })
+    } else if (event.type === 'assistant/message') {
+      const line = queryLine(event.data.message)
+      if (line.length === 0) continue
+      entries.push({ role: 'assistant', line })
+    }
+  }
+  if (turns <= 0) return []
+  // The window starts at the `turns`-th human turn from the end.
+  let humansSeen = 0
+  let start = -1
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]
+    if (entry === undefined || entry.role !== 'user') continue
+    humansSeen += 1
+    if (humansSeen >= turns) {
+      start = index
+      break
+    }
+  }
+  if (start === -1) start = 0
+  const lines: string[] = []
+  for (let index = start; index < entries.length; index += 1) {
+    const entry = entries[index]
+    if (entry === undefined) continue
+    if (dropLastHuman && index === lastHumanAt) continue
+    lines.push(`${entry.role}: ${entry.line}`)
+  }
+  return lines
+}
+
+/**
+ * The anchor message composed with the session's recent context into the
+ * automatic recall's query (the reference Hindsight integrations'
+ * `composeRecallQuery` + `truncateRecallQuery`, adapted to the durable
+ * session log): the recent PRIOR human turns above the anchor, one
+ * `user: …` / `assistant: …` line per message, under a `Prior context:`
+ * header, the anchor last. `turns <= 1` (or no context lines) leaves the
+ * anchor alone — exactly the single-message query. The composed query is
+ * capped at {@link MAX_QUERY_CHARS} the way the reference truncates it:
+ * the anchor is kept whole and the OLDEST context lines drop first (if
+ * even the anchor alone does not fit, the anchor is what gets cut — the
+ * existing cap behavior).
+ *
+ * `anchorIsOnLog`: the prefetch's anchor is the log's own last human
+ * message (its turn counts toward `turns`, its user line is dropped as
+ * the anchor, its assistant replies become context lines); the
+ * synchronous anchor comes from the pre-step payload, which is not on the
+ * log yet (the log holds the prior turns only, so it counts `turns - 1`).
+ */
+export function composeRecallQuery(
+  session: Session,
+  latest: string,
+  turns: number,
+  anchorIsOnLog: boolean,
+): string {
+  const anchor = latest.trim()
+  if (anchor.length === 0) return ''
+  if (turns <= 1) return anchor.slice(0, MAX_QUERY_CHARS)
+  const lines = contextLines(session, turns - (anchorIsOnLog ? 0 : 1), anchorIsOnLog)
+  if (lines.length === 0) return anchor.slice(0, MAX_QUERY_CHARS)
+  const header = 'Prior context:\n\n'
+  const tail = `\n\n${anchor}`
+  // The reference's truncation: keep the anchor whole, walk the lines
+  // newest-first, and drop the oldest while the query is over the cap.
+  const kept: string[] = []
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]
+    if (line === undefined) continue
+    kept.unshift(line)
+    if (`${header}${kept.join('\n')}${tail}`.length > MAX_QUERY_CHARS) {
+      kept.shift()
+      break
+    }
+  }
+  if (kept.length === 0) return anchor.slice(0, MAX_QUERY_CHARS)
+  return `${header}${kept.join('\n')}${tail}`
 }
 
 /** The plain text of a snapshot message; `''` when it is not one text block. */

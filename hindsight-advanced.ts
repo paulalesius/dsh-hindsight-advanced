@@ -119,6 +119,15 @@
  *   (up to `autoContextTimeoutMs`) and the snapshot targets the CURRENT
  *   message — relevant to what you just said, at the cost of bank
  *   latency on every first model call.
+ * - `recallContextTurns` — default `5` (the reference Hindsight
+ *   integrations ship `1`): the automatic recall's query is the anchor
+ *   message (the current one on the synchronous path, the previous
+ *   turn's on the prefetch) under a `Prior context:` block of the last
+ *   `recallContextTurns - 1` human turns from the durable log (the
+ *   anchor's own turn on the prefetch), one `user: …` / `assistant: …`
+ *   line per message, capped at 1000 chars with the OLDEST lines
+ *   dropping first (the anchor stays whole). `1` restores the
+ *   single-message query.
  * - `retainAsync` — default `false` (synchronous: the retain call waits for
  *   the bank to process the memory); `true` acknowledges fast and runs fact
  *   extraction in the background.

@@ -48,6 +48,13 @@
         # the server for it (up to autoContextTimeoutMs).
         prefetch: true
 
+        # 5 — how many prior human turns ride along in the automatic
+        # recall's query under a `Prior context:` block (one line per
+        # user/assistant message; capped at 1000 chars, oldest lines drop
+        # first). 1 — the single-message query the reference integrations
+        # ship.
+        recallContextTurns: 5
+
         # false — retain waits for the bank to process the memory, so the very
         # next recall already sees it. true — fast ack, background extraction.
         retainAsync: false

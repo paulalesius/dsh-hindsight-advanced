@@ -28,6 +28,15 @@ export interface ResolvedConfig {
    *  every turn takes the bounded synchronous path, whose query is the
    *  message that just arrived (the turn waits on the server for it). */
   prefetch: boolean
+  /** How many recent turns the automatic recall composes into its query
+   *  (the reference Hindsight integrations' `recallContextTurns`): `1` =
+   *  the anchor message only (the current turn's message on the
+   *  synchronous path, the previous turn's message on the prefetch);
+   *  `N` = the `N - 1` most recent PRIOR human turns above it, rendered
+   *  as a `Prior context:` block (their user messages and the assistant
+   *  replies between them), the whole thing capped at the query bound with
+   *  the anchor kept whole and the oldest context dropping first. */
+  recallContextTurns: number
   /** `true`: retain acknowledges fast and runs fact extraction in the
    *  background; `false` (default): the retain call waits for the bank to
    *  process the memory before returning. */
@@ -48,6 +57,10 @@ export interface ResolvedConfig {
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8888'
 const DEFAULT_MAX_RECALL_TOKENS = 1024
 const DEFAULT_AUTO_CONTEXT_TIMEOUT_MS = 2500
+/** How many recent turns the automatic recall composes into its query
+ *  (the reference Hindsight integrations' default is 1; the plugin's is 5
+ *  — the `Prior context:` block is the query's first-class part). */
+const DEFAULT_RECALL_CONTEXT_TURNS = 5
 /** Credential-reference grammar (a POSIX shell identifier), matching the
  *  credentials seam's own `CredentialRef` so an invalid name is a config
  *  issue rather than a per-call resolution surprise. */
@@ -198,6 +211,7 @@ export const Config: {
         ...(bankConfig !== undefined ? { bankConfig } : {}),
         autoContext: boolFlag(record, 'autoContext', true, issues),
         prefetch: boolFlag(record, 'prefetch', true, issues),
+        recallContextTurns: intFlag(record, 'recallContextTurns', DEFAULT_RECALL_CONTEXT_TURNS, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),
         autoContextTimeoutMs: intFlag(record, 'autoContextTimeoutMs', DEFAULT_AUTO_CONTEXT_TIMEOUT_MS, issues),
