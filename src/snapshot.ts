@@ -16,18 +16,22 @@ import type { DirectiveRule, RecallHit } from './types.ts'
 /** Bound for the recall query drawn from the user message. */
 export const MAX_QUERY_CHARS = 1000
 
-/** Render hits as the model-facing memory text. Every hit carries its id
- *  (the handle for memory curation); an observation hit the bank backed
- *  with source facts gets its backing facts under it, one `from:` line per
- *  fact — each with the backing fact's id, the handle for invalidating it
- *  (the observation is derived and cannot be invalidated itself). */
+/** Render hits as the model-facing memory text. A curatable hit (a world /
+ *  experience fact) carries its id — the handle for memory curation. An
+ *  observation hit carries NO id of its own: the bank refuses to curate
+ *  derived observations, so rendering its id would hand the model the exact
+ *  handle that 400s. The curatable half of an observation pair is its
+ *  backing fact, rendered under it on the `from:` line — ids ONLY, no fact
+ *  text: the consolidated observation already supersedes its sources, so
+ *  re-rendering their text would only duplicate the recall context. */
 export function renderRecall(bank: string, hits: RecallHit[]): string {
   const lines = [`Relevant memories from the Hindsight bank "${bank}":`]
   for (const hit of hits) {
     const type = typeof hit.type === 'string' && hit.type.length > 0 ? ` (${hit.type})` : ''
-    lines.push(`- ${hit.text.trim()}${type} id:${hit.id}`)
+    const id = hit.type === 'observation' ? '' : ` id:${hit.id}`
+    lines.push(`- ${hit.text.trim()}${type}${id}`)
     if (hit.sources !== undefined && hit.sources.length > 0) {
-      lines.push(`  from: ${hit.sources.map(source => `${source.text} (id:${source.id})`).join('; ')}`)
+      lines.push(`  from: ${hit.sources.map(source => `id:${source.id}`).join('; ')}`)
     }
   }
   return lines.join('\n')

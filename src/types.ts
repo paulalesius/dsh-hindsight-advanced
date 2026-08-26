@@ -25,6 +25,19 @@ export interface DirectiveRule {
   priority: number
 }
 
+/** One stored memory unit read by id: its text and type, plus — for an
+ *  observation — the source facts it derives from (the backing facts' ids,
+ *  the handles for invalidating them — the observation itself is derived
+ *  and cannot be invalidated). */
+export interface MemoryUnit {
+  id: string
+  text: string
+  type?: string | null
+  /** The source facts the bank folded in behind this unit (observation
+   *  provenance), in order; absent when the server returned none. */
+  sources?: { id: string; text: string }[]
+}
+
 /** Options for a targeted recall. */
 export interface RecallOptions {
   /** Restrict to fact types. */

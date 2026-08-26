@@ -3,10 +3,12 @@
 // a single mount routing to a scratch bank. Also verifies the visibility
 // tiers against the REAL server: retain tier tags (preset default, session
 // tier), a server-side tag read-back via /memories/list, the recall tier
-// filter (own + preset tiers visible, a sibling session's tier not), and
+// filter (own + preset tiers visible, a sibling session's tier not), read
+// (a rendered id resolves to its text and type via GET /memories/{id}),
 // invalidation (the soft PATCH retires a memory and it leaves the recall
-// surface), and observation curation (a derived observation is not
-// curatable; its backing fact — the from: line's id — is).
+// surface), and observation curation (an observation hit renders no id of
+// its own; the from: line's id — the backing fact — is the one curatable
+// handle).
 //
 // Uses a scratch bank (auto-created by the server) and deletes it at the end,
 // so the user's real banks are never touched.
@@ -161,6 +163,15 @@ let notionId = ''
   assert.ok(notionIdMatch, `the session-tier recall rendered no id to invalidate: ${JSON.stringify(sessionHits)}`)
   notionId = notionIdMatch[1]
 
+  // read: the rendered id resolves to its text and type (the disambiguation
+  // step of a curation call against the REAL server's GET /memories/{id})
+  const read = await run({ action: 'read', id: notionId }, { agent: alice, signal })
+  assert.equal(read.action, 'read')
+  assert.equal(read.bank, BANK)
+  assert.match(String(read.text), /Notion/)
+  assert.match(String(read.text), new RegExp(`id:${notionId}`))
+  console.log('ok  read → the rendered id resolves to its text and type (verified against the real server)')
+
   // bob (same preset, another session): the preset tier is shared, the
   // session tier is not — the server-side tag filter makes this exact
   const bobPreset = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: bob, signal })
@@ -194,24 +205,23 @@ let notionId = ''
   console.log('ok  invalidate → the memory is soft-retired and leaves the recall surface')
 }
 
-// ── observation invalidation: only the backing fact is curatable ────────────
+// ── observation curation: only the backing fact carries an id ───────────────
 // The bank's consolidation is asynchronous and not guaranteed on a tiny
 // scratch bank, so this check runs only when the server actually produced
-// an observation hit with a from: line.
+// an observation hit with a from: line. (The derived-observation 400 path
+// is exercised by the stub suite — the live surface no longer renders the
+// observation's own id, so there is no handle to feed it.)
 {
   const out = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: alice, signal })
   const text = String(out.text)
-  const fromId = text.match(/\(id:([^\s)]+)\)/)
-  const obsId = text.match(/\(observation\) id:([^\s]+)/)
-  if (fromId === null || obsId === null || fromId[1] === obsId[1]) {
-    console.log('skip  observation invalidation → the bank produced no observation hit to exercise it')
+  const fromId = text.match(/from: id:([^\s;]+)/)
+  if (fromId === null) {
+    console.log('skip  observation curation → the bank produced no observation hit with a from: line to exercise it')
   } else {
-    // the derived observation itself is not curatable
-    let errorText = ''
-    try {
-      await run({ action: 'invalidate', id: obsId[1], reason: 'derived, not curatable' }, { agent: alice, signal })
-    } catch (error) { errorText = String(error.message ?? error) }
-    assert.match(errorText, /hindsight: .*returned HTTP (400|404|409|422)/, `expected the server to refuse the observation invalidation, got: ${errorText}`)
+    // the observation renders NO id of its own — the trap handle whose
+    // invalidation the bank refuses; the from: line's id is the one
+    // curatable handle
+    assert.doesNotMatch(text, /\(observation\) id:/, 'the observation hit renders no id of its own')
 
     // the backing fact (the from: line's id) is the curatable handle
     const backing = await run({ action: 'invalidate', id: fromId[1], reason: 'live round-trip: retiring the backing fact' }, { agent: alice, signal })
@@ -221,11 +231,11 @@ let notionId = ''
     while (Date.now() < deadline) {
       const out2 = await run({ action: 'recall', query: 'how is live-demo built and where does it deploy' }, { agent: alice, signal })
       after = String(out2.text)
-      if (!after.includes(`(id:${fromId[1]})`)) break
+      if (!after.includes(`id:${fromId[1]}`)) break
       await new Promise(r => setTimeout(r, 3_000))
     }
-    assert.doesNotMatch(after, `\\(id:${fromId[1]}\\)`, `the retired backing fact still renders as a source: ${JSON.stringify(after)}`)
-    console.log('ok  observation invalidation → the derived observation is refused, the backing fact is retired and its from line is pruned')
+    assert.doesNotMatch(after, `id:${fromId[1]}`, `the retired backing fact still renders as a source: ${JSON.stringify(after)}`)
+    console.log('ok  observation curation → the observation renders no id of its own; the backing fact is retired and its from line is pruned')
   }
 }
 

@@ -1,7 +1,7 @@
 /**
  * One mount: a fixed bank plus its memory operations (retain / recall /
- * reflect / invalidate) and the lazy one-time sync of the declared bank
- * config.
+ * reflect / read / invalidate) and the lazy one-time sync of the declared
+ * bank config.
  *
  * `createMount` is the plugin's per-mount factory: it owns the mount's
  * mutable state (the bank-config sync) in a closure, so every module
@@ -17,7 +17,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { request } from './client.ts'
 import type { ResolvedConfig } from './config.ts'
 import { recallTags, scopeTags, type MemoryScope } from './tiers.ts'
-import type { DirectiveRule, RecallHit, RecallOptions } from './types.ts'
+import type { DirectiveRule, MemoryUnit, RecallHit, RecallOptions } from './types.ts'
 
 /** The response token budget for source-fact provenance on recall. The
  *  enrichment is post-selection (it cannot change which facts are recalled);
@@ -69,6 +69,15 @@ export interface Mount {
     session: Session | undefined,
     scope: MemoryScope,
   ): Promise<void>
+  /** Read one stored memory by its id (the handle recall results and the
+   *  snapshot render as `id:<uuid>`): its text, its type (world /
+   *  experience / observation), and — for an observation — the backing
+   *  facts' ids folded in by the bank (the handles for invalidating them).
+   *  The disambiguation step of a multi-id invalidation: see what an id
+   *  actually says before choosing which of several to retire. No session:
+   *  the read is on an id the bank already surfaced, not a tier-scoped
+   *  query. */
+  read(memoryId: string, signal: AbortSignal): Promise<MemoryUnit>
   /** Soft-retire a stored memory by its id (the handle recall results and
    *  the snapshot render as `id:<uuid>`): the bank excludes it from recall
    *  and consolidation, prunes its derived observations and links, and moves
@@ -259,6 +268,40 @@ export function createMount(
       const body: Record<string, unknown> = { name, content, is_active: true }
       if (tags.length > 0) body.tags = tags
       await call(`${bankPath}/directives`, body, signal)
+    },
+
+    async read(memoryId, signal): Promise<MemoryUnit> {
+      // Read-only: the mirror of the bank's GET /memories/{id} — the unit's
+      // text and type, and for an observation the source facts the bank
+      // folds in (ids + texts). The id here is one the bank already surfaced
+      // (a recall result, a snapshot line, a from: line), so there is no
+      // tier scoping to apply.
+      await syncBankConfig(signal)
+      const data = await call(`${bankPath}/memories/${encodeURIComponent(memoryId)}`, undefined, signal, 'GET')
+      if (typeof data.text !== 'string' || data.text.trim().length === 0) {
+        throw new Error(`hindsight: the bank returned no text for memory ${memoryId}`)
+      }
+      const type = typeof data.type === 'string' && data.type.length > 0 ? data.type : null
+      const unit: MemoryUnit = { id: memoryId, text: data.text.trim(), type }
+      // The observation's source facts: the ids in order (the handles for
+      // invalidation), each resolved to its text when the bank folded it in.
+      const ids = Array.isArray(data.source_memory_ids) ? data.source_memory_ids : []
+      const folded: Record<string, string> = {}
+      if (Array.isArray(data.source_memories)) {
+        for (const source of data.source_memories) {
+          if (typeof source !== 'object' || source === null) continue
+          const entry = source as RecallHit
+          if (typeof entry.id === 'string' && typeof entry.text === 'string' && entry.text.trim().length > 0) {
+            folded[entry.id] = entry.text.trim()
+          }
+        }
+      }
+      const sources: { id: string; text: string }[] = []
+      for (const id of ids) {
+        if (typeof id === 'string') sources.push({ id, text: folded[id] ?? '' })
+      }
+      if (sources.length > 0) unit.sources = sources
+      return unit
     },
 
     async invalidate(memoryId, reason, signal): Promise<void> {

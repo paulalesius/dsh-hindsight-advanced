@@ -27,14 +27,18 @@ export function buildTool(mount: Mount) {
       + `\n`
       + `reflect — ask the bank a question and get a synthesized answer grounded in its facts. Use it when the answer must combine several memories, e.g. "what do we know about X?".\n`
       + `\n`
-      + `invalidate — retire a stored memory that has turned out to be wrong or stale (the user corrected it, or you found a direct contradiction), so it stops appearing in recall. Pass the memory's id (the id:<uuid> shown in recall results and the per-turn snapshot) and the reason. Call it only when you are confident the memory is wrong: invalidation is soft and reversible, but do not clobber a memory future sessions still need. If the corrected truth is already stored, prefer invalidating the stale memory over retaining a contradicting fact — a stale memory left live keeps making the bank return both beliefs forever. Only raw facts (world / experience) can be invalidated — if the hit is an observation, invalidate its backing fact: the id on the "from:" line under it.\n`
+      + `read — resolve a stored memory's id to its text and type. Call it when you need to see what an id in a recall result or a "from:" line actually says before acting on it (e.g. deciding which of several ids to invalidate). For an observation, the backing facts' ids come back too.\n`
+      + `\n`
+      + `invalidate — retire a stored memory that has turned out to be wrong or stale (the user corrected it, or you found a direct contradiction), so it stops appearing in recall. Pass the memory's id (the id:<uuid> shown in recall results and the per-turn snapshot) and the reason. Call it only when you are confident the memory is wrong: invalidation is soft and reversible, but do not clobber a memory future sessions still need. If the corrected truth is already stored, prefer invalidating the stale memory over retaining a contradicting fact — a stale memory left live keeps making the bank return both beliefs forever. Only raw facts (world / experience) can be invalidated — an observation hit carries no id of its own, and the id on its "from:" line is the curatable one: invalidate that backing fact to retire it. If the "from:" line lists several ids, decide which level is wrong before calling invalidate:\n`
+      + `- the observation is wrong as a statement, but its facts are individually true → invalidate nothing (wrong derivation; the facts are still usable).\n`
+      + `- one or more facts are wrong → use read on each id to see its text, then invalidate only the wrong id(s), one call each.\n`
       + `\n`
       + `If the Hindsight server is unreachable the call fails with an error: continue the work without the memory and do not retry it repeatedly.`,
     parameters: {
       action: {
         type: 'string',
         required: true,
-        enum: ['retain', 'recall', 'reflect', 'invalidate'],
+        enum: ['retain', 'recall', 'reflect', 'read', 'invalidate'],
         description: 'The operation to perform.',
       },
       text: {
@@ -85,9 +89,9 @@ export function buildTool(mount: Mount) {
       id: {
         type: 'string',
         description:
-          'Invalidate only. The memory id to retire, as shown in recall results and the per-turn '
-          + 'snapshot (id:<uuid>). For a consolidated observation hit, that is the backing fact\'s id '
-          + 'on the "from:" line under it — the observation itself is derived and cannot be invalidated.',
+          'Invalidate and read only. The memory id, as shown in recall results and the per-turn '
+          + 'snapshot (id:<uuid>) or on a "from:" line under an observation hit (which shows no id of '
+          + 'its own — the observation itself is derived and cannot be invalidated).',
       },
       reason: {
         type: 'string',
@@ -161,12 +165,44 @@ export function buildTool(mount: Mount) {
           const answer = await mount.reflect(query, exec.signal, exec.agent?.session)
           return { action: 'reflect', bank: config.bank, text: answer }
         }
+        case 'read': {
+          const memoryId = (args.id ?? '').trim()
+          if (memoryId.length === 0) throw new Error('hindsight: id is required for read')
+          const unit = await mount.read(memoryId, exec.signal)
+          // The same rendering contract as recall: text + type + id — and for
+          // an observation, its backing facts under it, WITH their text this
+          // time: this is the disambiguation call, the one whose whole reason
+          // to exist is to show what each id actually says.
+          const type = unit.type === null ? '' : ` (${unit.type})`
+          let text = `- ${unit.text}${type} id:${unit.id}`
+          if (unit.sources !== undefined && unit.sources.length > 0) {
+            const lines = unit.sources.map(source =>
+              source.text.length > 0 ? `- id:${source.id} — "${source.text}"` : `- id:${source.id}`,
+            )
+            text += `\n  from:\n  ${lines.join('\n  ')}`
+          }
+          return { action: 'read', bank: config.bank, text }
+        }
         case 'invalidate': {
           const memoryId = (args.id ?? '').trim()
           if (memoryId.length === 0) throw new Error('hindsight: id is required for invalidate')
           const reason = (args.reason ?? '').trim()
           if (reason.length === 0) throw new Error('hindsight: reason is required for invalidate')
-          await mount.invalidate(memoryId, reason, exec.signal)
+          try {
+            await mount.invalidate(memoryId, reason, exec.signal)
+          } catch (error) {
+            // The bank's 400 for a derived observation is the one trap the
+            // model can still fall into (a snapshot committed earlier in
+            // this session can predate the no-id rendering) — surface it
+            // as the instruction it should have been, not a raw HTTP error.
+            if (error instanceof Error && error.message.includes('is a observation')) {
+              throw new Error(
+                `hindsight: ${memoryId} is a derived observation — it regenerates from its source facts and cannot be invalidated directly. `
+                + 'If the fact is wrong, invalidate its backing fact instead: pass the id on the \'from:\' line under that observation.',
+              )
+            }
+            throw error
+          }
           return {
             action: 'invalidate',
             bank: config.bank,

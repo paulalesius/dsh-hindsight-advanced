@@ -1,4 +1,4 @@
-// A stub Hindsight REST server: just enough of retain/recall/reflect/
+// A stub Hindsight REST server: just enough of retain/recall/reflect/read/
 // invalidate to exercise the plugin end-to-end, plus a request log for
 // shape assertions.
 import http from 'node:http'
@@ -96,6 +96,32 @@ const server = http.createServer((req, res) => {
         }
       }
       return json(200, Object.keys(sourceFacts).length > 0 ? { results, source_facts: sourceFacts } : { results })
+    }
+    if (req.method === 'GET' && rest[0] === 'memories' && rest.length === 2) {
+      // Read one memory by id (the real server's GET /memories/{id}): the
+      // unit's text and type, and — like the real server — for an
+      // observation the source facts folded in (ids + texts). Invalidated
+      // units still resolve (they keep their bookkeeping in the archive).
+      const memory = state.memories.find(candidate => candidate.id === rest[1] && candidate.bank === bank)
+      if (memory === undefined) return json(404, { error: `stub: Memory unit '${rest[1]}' not found` })
+      const unit = {
+        id: memory.id,
+        text: memory.text,
+        type: memory.observation ? 'observation' : 'world',
+        state: memory.invalidated ? 'invalidated' : 'valid',
+      }
+      if (memory.observation) {
+        const sources = (memory.source_fact_ids ?? [])
+          .map(id => state.memories.find(candidate => candidate.id === id))
+          .filter(candidate => candidate !== undefined)
+        unit.source_memory_ids = sources.map(candidate => candidate.id)
+        unit.source_memories = sources.map(candidate => ({
+          id: candidate.id,
+          text: candidate.text,
+          type: candidate.observation ? 'observation' : 'world',
+        }))
+      }
+      return json(200, unit)
     }
     if (req.method === 'PATCH' && rest[0] === 'memories' && rest.length === 2) {
       // update a memory (invalidation). Like the real server: soft — the

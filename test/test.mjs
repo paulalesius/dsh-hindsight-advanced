@@ -4,14 +4,16 @@
 // with apiKey), per-mount bank behavior (banks are the OUTER isolation;
 // inside a bank, the three visibility tiers), authorization (literal key,
 // credential ref via the seam, ref via the environment fallback), tool
-// execution (retain / recall / reflect, with tier tags, plus standing
+// execution (retain / recall / reflect / read, with tier tags, plus standing
 // directives: kind: directive, tier-scoped listing, rules-on-empty-recall,
 // plus provenance: budgeted source-fact enrichment on recall, hit ids, and
 // `from:` lines under observation hits — in the tool AND the auto-recall
 // snapshot — and retain's explicit occurrence timestamp),
 // plus curation: invalidating a memory the model has shown to be wrong or
 // stale (a soft PATCH with a recorded reason; the retired memory leaves the
-// recall surface),
+// recall surface) and read — resolving an id to its text and type (a fact:
+// its own line; an observation: its backing facts WITH their text; an
+// unknown id: the same bounded 404),
 // plus the automatic recall's query composition (recallContextTurns,
 // default 5): the anchor message under a `Prior context:` block of the
 // recent prior turns (one line per user / assistant message), capped at
@@ -256,7 +258,7 @@ async function runStep(listener, a, step, messages) {
   const tool = ctx.tools.registered[0]
   const listener = ctx.listeners[0].fn
   assert.equal(tool.name, 'hindsight')
-  assert.deepEqual(tool.parameters.properties.action.enum, ['retain', 'recall', 'reflect', 'invalidate'])
+  assert.deepEqual(tool.parameters.properties.action.enum, ['retain', 'recall', 'reflect', 'read', 'invalidate'])
   assert.ok(tool.parameters.required?.includes('action'))
   assert.equal(tool.parameters.properties.tags, undefined, 'no tag parameter')
   console.log('ok  tool registered, pre-step listener prepended (one mount, one bank)')
@@ -666,14 +668,18 @@ async function runStep(listener, a, step, messages) {
   assert.deepEqual(recallReq.body.include, { source_facts: { max_tokens: 512 } }, 'source facts requested, budgeted')
 
   // the observation hit renders its backing fact UNDER it — with the
-  // backing fact's id (the curatable handle); the raw fact hit gets no
-  // from line of its own (it is not an observation, so the server backs nothing)
+  // backing fact's id, the only curatable handle (the observation itself
+  // renders NO id: it is derived and the bank refuses to curate it); the
+  // raw fact hit gets no from line of its own (it is not an observation,
+  // so the server backs nothing)
   const result = await tool.execute({ action: 'recall', query: 'remote worker' }, { agent: alice, signal: baseSignal })
-  assert.match(result.text, /remote worker based at home\. \(observation\) id:m\d+/, 'the observation hit carries its id')
-  assert.match(result.text, /from: The user works remotely from home\. \(id:m\d+\)/, 'its backing fact renders under it, WITH its id')
+  assert.match(result.text, /remote worker based at home\. \(observation\)/, 'the observation hit renders')
+  assert.doesNotMatch(result.text, /remote worker based at home\. \(observation\) id:/, '... with NO id of its own (the trap handle)')
+  assert.match(result.text, /from: id:m\d+/, 'its backing fact renders under it as its id (the curatable one)')
+  assert.doesNotMatch(result.text, /from: The user works remotely/, '... with NO fact text (the observation already supersedes its sources)')
   assert.match(result.text, /works remotely from home\. \(world\) id:m\d+/, 'the raw fact carries its id')
   assert.doesNotMatch(result.text, /works remotely from home\. \(world\) id:m\d+\n  from:/, 'the raw fact gets no from line')
-  console.log('ok  mount G: recall requests budgeted source facts; the observation renders its from line with the backing fact\'s id')
+  console.log('ok  mount G: recall requests budgeted source facts; the observation renders no id of its own, only the from line with the backing fact\'s id')
 
   // the auto-recall snapshot carries the same provenance (id + from line)
   await runStep(listener, alice, 1, [userMsg('is the user a remote worker?')])
@@ -682,9 +688,10 @@ async function runStep(listener, a, step, messages) {
   ).at(-1)
   assert.deepEqual(autoReq.body.include, { source_facts: { max_tokens: 512 } }, 'auto-recall requests source facts too')
   const snap = snapshots(alice.session).at(-1).data.content[0].text
-  assert.match(snap, /remote worker based at home\. \(observation\) id:m\d+/, 'the snapshot observation carries its id')
-  assert.match(snap, /from: The user works remotely from home\. \(id:m\d+\)/, 'its from line (with the backing fact\'s id) lands in the snapshot')
-  console.log('ok  mount G: the automatic snapshot carries provenance (id + from line) too')
+  assert.doesNotMatch(snap, /remote worker based at home\. \(observation\) id:/, 'the snapshot observation carries no id of its own')
+  assert.match(snap, /from: id:m\d+/, 'its from line (the backing fact\'s id) lands in the snapshot')
+  assert.doesNotMatch(snap, /from: The user works remotely/, '... with no duplicated fact text')
+  console.log('ok  mount G: the automatic snapshot carries provenance (from line with the backing fact\'s id) too')
 }
 
 // ── mount H: curation — the model retires a memory it has shown to be wrong ─
@@ -701,6 +708,16 @@ async function runStep(listener, a, step, messages) {
   const match = recallText.match(/id:(m\d+)/)
   assert.ok(match, `the recall result carries the id to invalidate: ${recallText}`)
   const memoryId = match[1]
+
+  // read → a GET that resolves the rendered id to its text and type — the
+  // disambiguation step for an invalidation the model is not sure about
+  const read = await tool.execute({ action: 'read', id: memoryId }, { signal: baseSignal })
+  assert.equal(read.action, 'read')
+  const readReq = state.requests.at(-1)
+  assert.equal(readReq.method, 'GET')
+  assert.equal(readReq.path, `/v1/default/banks/curation/memories/${memoryId}`)
+  assert.match(read.text, new RegExp(`Postgres database at home\\. \\(world\\) id:${memoryId}`))
+  console.log('ok  mount H: read resolves the fact id to its text and type (world)')
 
   // invalidate → a PATCH with the soft-retire state and the recorded reason
   const result = await tool.execute(
@@ -725,28 +742,56 @@ async function runStep(listener, a, step, messages) {
   )
   console.log('ok  mount H: an unknown id degrades to the clean bounded error')
 
+  // read shares the same bounded 404 degradation
+  await assert.rejects(
+    () => tool.execute({ action: 'read', id: 'm-none' }, { signal: baseSignal }),
+    /hindsight: .*returned HTTP 404/,
+  )
+  console.log('ok  mount H: a read of an unknown id degrades to the same clean bounded error')
+
   // the hit the model usually sees is the CONSOLIDATED observation — the
-  // curatable handle is its backing fact, rendered on the from: line
+  // only curatable handle in the pair is its backing fact, on the from:
+  // line; the observation itself renders no id to pass to invalidate
   await tool.execute({ action: 'retain', text: 'The billing service is written in Go.' }, { signal: baseSignal })
   await tool.execute({ action: 'retain', text: '[observation] The billing service language is Go.' }, { signal: baseSignal })
   const obsText = (await tool.execute({ action: 'recall', query: 'billing service' }, { signal: baseSignal })).text
-  const obsId = obsText.match(/\(observation\) id:(m\d+)/)?.[1]
-  const backingId = obsText.match(/\(id:(m\d+)\)/)?.[1]
-  assert.ok(obsId && backingId && obsId !== backingId, `the observation and its backing fact carry distinct ids: ${obsText}`)
+  assert.doesNotMatch(obsText, /\(observation\) id:/, 'the observation hit shows no id of its own')
+  const backingId = obsText.match(/from: id:(m\d+)/)?.[1]
+  assert.ok(backingId, `the from line carries the one id handle: ${obsText}`)
 
-  // the derived observation itself is not curatable — the server refuses it
+  // read of the observation's OWN id (held from an earlier snapshot): the
+  // backing fact comes back WITH its text — unlike recall's ids-only from
+  // line, this is the disambiguation call whose job is to show what each id
+  // actually says before the model picks which to invalidate
+  const obsMemory = [...state.memories].reverse().find(candidate => candidate.bank === 'curation' && candidate.observation)
+  const obsRead = await tool.execute({ action: 'read', id: obsMemory.id }, { signal: baseSignal })
+  assert.match(obsRead.text, new RegExp(`billing service language is Go\\. \\(observation\\) id:${obsMemory.id}`))
+  assert.match(obsRead.text, new RegExp(`from:\\s*- id:${backingId} — "The billing service is written in Go\\."`))
+  console.log('ok  mount H: read of the observation id resolves its backing fact WITH its text')
+
+  // read of the backing fact's id: the "read each id" step of a multi-id
+  // invalidation — the fact resolves to its own text and type
+  const backingRead = await tool.execute({ action: 'read', id: backingId }, { signal: baseSignal })
+  assert.match(backingRead.text, new RegExp(`billing service is written in Go\\. \\(world\\) id:${backingId}`))
+  console.log('ok  mount H: read of the backing fact id resolves its own text and type')
+
+  // the model can still be handed the observation's OWN id (a snapshot
+  // committed earlier in the session predates the no-id rendering): the
+  // bank refuses it, and the plugin surfaces the refusal as the
+  // instruction it should have been, not a raw HTTP 400
   await assert.rejects(
-    () => tool.execute({ action: 'invalidate', id: obsId, reason: 'derived, not curatable' }, { signal: baseSignal }),
-    /hindsight: .*returned HTTP 400/,
+    () => tool.execute({ action: 'invalidate', id: obsMemory.id, reason: 'derived, not curatable' }, { signal: baseSignal }),
+    /is a derived observation.*backing fact.*from:/,
   )
-  console.log('ok  mount H: invalidating the derived observation itself is refused (HTTP 400)')
+  console.log('ok  mount H: invalidating a derived observation is refused with an actionable pointer to its backing fact')
 
   // invalidating the backing fact: the observation still surfaces, but its
   // from line is pruned (the source fact is no longer a source fact)
   await tool.execute({ action: 'invalidate', id: backingId, reason: 'the service was rewritten in Rust' }, { signal: baseSignal })
   const afterObs = (await tool.execute({ action: 'recall', query: 'billing service' }, { signal: baseSignal })).text
-  assert.match(afterObs, /billing service language is Go\. \(observation\) id:/, 'the observation still surfaces')
-  assert.doesNotMatch(afterObs, /from:/, '... but its from line is gone')
+  assert.match(afterObs, /billing service language is Go\. \(observation\)/, 'the observation still surfaces')
+  assert.doesNotMatch(afterObs, /billing service language is Go\. \(observation\) id:/, '... still with no id of its own')
+  assert.doesNotMatch(afterObs, /from:/, '... and its from line is gone')
   console.log('ok  mount H: invalidating the backing fact prunes the from line, the observation stays')
 }
 
