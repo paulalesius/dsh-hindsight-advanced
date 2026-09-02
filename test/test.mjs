@@ -155,6 +155,7 @@ function makeSession(id, header = {}) {
     id,
     header,
     events: [],
+    snapshotEvents: () => [...session.events],
     surface: { nodes: [] },
     append(type, data, opts = {}) {
       seq += 1
