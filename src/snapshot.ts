@@ -104,7 +104,7 @@ export function queryFromMessages(messages: readonly UserMessage[]): string {
  *  snapshots and the other plugin-sourced context rows are user-role
  *  messages too, and none of them is a query. */
 export function queryFromSession(session: Session): string {
-  const events = session.events
+  const events = session.snapshotEvents()
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event === undefined || event.type !== 'user/message') continue
@@ -146,7 +146,7 @@ function queryLine(message: UserMessage | AssistantMessage): string {
 function contextLines(session: Session, turns: number, dropLastHuman: boolean): string[] {
   const entries: { role: 'user' | 'assistant'; line: string }[] = []
   let lastHumanAt = -1
-  const events = session.events
+  const events = session.snapshotEvents()
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index]
     if (event === undefined) continue
@@ -253,7 +253,7 @@ function snapshotText(message: UserMessage): string {
  */
 export function findRetainedSnapshots(session: Session, pluginName: string): { seq: number; text: string }[] {
   const onSurface = new Set(session.surface.nodes)
-  const events = session.events
+  const events = session.snapshotEvents()
   const retained: { seq: number; text: string }[] = []
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
