@@ -30,18 +30,39 @@
  * snapshot targets the CURRENT message — at the cost of the bank's
  * latency on the turn's first model call.
  *
- * The plugin only ever APPENDS a snapshot; it never replaces or erases a
- * previous turn's snapshot, so the model context accumulates one snapshot
- * per distinct turn (the durable log keeps every snapshot for replay and
- * audit). An identical recall re-commits no duplicate block (no churn) —
- * the turn instead gets a marker row naming the applied memories (one
- * compact line each), so the UI still shows exactly what memory was
- * applied that turn; an empty recall leaves the existing snapshots in
- * place.
+ * How the snapshot lands on the model surface depends on `recallPreserve`
+ * (config, default `true` — the preserve-by-default half of the flag name,
+ * matching the llama-server `--no-reasoning-preserve` semantics):
+ *
+ * - `recallPreserve: true` (default): the plugin only ever APPENDS a
+ *   snapshot; it never replaces or erases a previous turn's snapshot, so the
+ *   model context accumulates one snapshot per distinct turn (the durable
+ *   log keeps every snapshot for replay and audit). The snapshot rides the
+ *   pre-step decision, which the loop appends. An identical recall
+ *   re-commits no duplicate block (no churn) — the turn instead gets a
+ *   marker row naming the applied memories (one compact line each), so the
+ *   UI still shows exactly what memory was applied that turn; an empty
+ *   recall leaves the existing snapshots in place.
+ *
+ * - `recallPreserve: false`: the model surface carries only the LATEST
+ *   snapshot. Each new one REPLACES the previously retained snapshot in
+ *   place (the session surface's `replace` op, landing at the old snapshot's
+ *   position) instead of appending a new row, so the surface holds a single,
+ *   ever-refreshed snapshot. Because the loop appends decision messages with
+ *   a hardcoded `append` surface op, the replace — and its shadow-price
+ *   metering event — is committed by a direct, synchronous `session.append`
+ *   pair (the `compaction/prune` metering record immediately before the
+ *   replacing `user/message`, exactly the adjacency the token meter's
+ *   shadow-price fold requires). An identical recall commits nothing (the
+ *   snapshot is already current, so there is no churn and the row is left
+ *   untouched). The durable log still keeps every snapshot for replay and
+ *   audit; a replace that fails degrades to the append-only path so the turn
+ *   never breaks.
  *
  * @module dsh-plugin-hindsight-advanced/autorecall
  */
 
+import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
@@ -49,6 +70,31 @@ import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import type { Mount } from './bank.ts'
 import { composeRecallQuery, findRetainedSnapshots, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderUnchanged } from './snapshot.ts'
 import type { DirectiveRule, RecallHit } from './types.ts'
+
+/**
+ * The `recallPreserve: false` path prices its surface `replace` through the
+ * shadow-price metering event `compaction/prune`. That event type is declared
+ * by `@deepseek-ai/dsh-compaction`, which is a DSH-internal workspace package
+ * and NOT resolvable from this userland plugin — so the base `SessionEventMap`
+ * has no `compaction/prune` key and `session.append('compaction/prune', …)`
+ * would not type-check. Re-declare the exact data shape here (type-only; the
+ * runtime already accepts the event and folds it in the token meter).
+ */
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /** A shadow-price metering record: the next surface `replace` prices the
+     *  range it shadows out of the running surface-token total. Log-only (not
+     *  a surface event), so it carries no `SurfaceIntent`. */
+    'compaction/prune': {
+      /** Inclusive range of surface nodes whose price the replace retires. */
+      shadowedRange: { start: SessionSeq; end: SessionSeq }
+      /** The shadowed surface-node seqs (must equal the replace's range). */
+      shadowedSeqs: SessionSeq[]
+      /** Heuristic tokens of the shadowed range under the fixed estimator. */
+      shadowedTokenCount: number
+    }
+  }
+}
 
 /** The `agent/pre-step` event payload (the live-runtime event shape). */
 export interface PreStepPayload {
@@ -123,14 +169,36 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  * - `disposed` — aborts and drops the session's slot.
  *
  * At most one live slot per session: created at turn-stopping, consumed or
- * discarded at the next step-1 pre-step.
+ * discarded at the next step-1 pre-step. `ctx` is threaded through only for
+ * the `recallPreserve: false` shadow-price: it is read with an untyped
+ * `ctx.get('tokenMeter')` at commit time (the seam is optional, so a
+ * composition without the token meter degrades to an unpriced replace).
  */
 export function buildAutoRecall(
   mount: Mount,
   pluginName: string,
+  ctx: Context,
 ): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; disposed: (payload: DisposedPayload) => void } {
   const config = mount.config
   const slots = new Map<string, Slot>()
+
+  /**
+   * The shadow-price (heuristic tokens) for the snapshot a `replace` retires,
+   * read through the token meter. `undefined` when the composition has no
+   * token meter (or the read fails): the replace then folds price-neutrally
+   * and the meter overcounts until its next usage sample — a safe degrade,
+   * never a turn failure.
+   */
+  function estimateSnapshotTokens(message: UserMessage): number | undefined {
+    const meter = ctx.get('tokenMeter')
+    if (meter === undefined || meter === null) return undefined
+    try {
+      const tokens = meter.estimateMessage(message)
+      return typeof tokens === 'number' && Number.isFinite(tokens) ? tokens : undefined
+    } catch {
+      return undefined
+    }
+  }
 
   function discardSlot(sessionId: string): void {
     const entry = slots.get(sessionId)
@@ -183,10 +251,26 @@ export function buildAutoRecall(
     slots.set(session.id, entry)
   }
 
-  /** Render hits + rules and commit them as the snapshot message; an
-   *  unchanged recall commits the marker row instead of a duplicate
-   *  block (no churn, but the turn still gets its visible row, naming
-   *  the memories it applied). */
+  /** Render hits + rules and commit them as the snapshot message.
+   *
+   *  `recallPreserve: true` (default): append-only — the snapshot rides
+   *  the pre-step decision (the loop appends it); an identical recall
+   *  commits the marker row instead of a duplicate block (no churn, but
+   *  the turn still gets its visible row, naming the memories it applied).
+   *
+   *  `recallPreserve: false`: the model surface carries only the LATEST
+   *  snapshot. The new one REPLACES the previously retained snapshot in
+   *  place via a direct, synchronous `session.append` pair — the shadow-
+   *  price `compaction/prune` (log-only) immediately BEFORE the replacing
+   *  `user/message`, the exact adjacency the token meter's shadow-price
+   *  fold requires — so the retired snapshot's tokens are subtracted and
+   *  the replace is priced as new minus shadowed. An identical recall
+   *  commits nothing (the snapshot is already current; a marker row would
+   *  dangle, pointing at the snapshot it just removed). The durable log
+   *  keeps every snapshot regardless. A failed replace degrades to the
+   *  append-only path so the turn never breaks; an orphaned
+   *  `compaction/prune` from a failed replace is harmless on replay (its
+   *  claim is dropped by the next event). */
   function commitSnapshot(
     decision: PreStepDecision,
     session: Session,
@@ -196,23 +280,69 @@ export function buildAutoRecall(
     if (decision.kind !== 'enter') return decision
     if (hits.length === 0 && rules.length === 0) return decision
     const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
-    // Identical recall: the block is already on the surface and still in
-    // the model context (with the prefetch, the job's query IS the
-    // previous turn's message, so this is the COMMON case). Re-committing
-    // it would be churn — but the turn still gets its row: the marker,
-    // naming the applied memories one compact line each, so the UI shows
-    // exactly what was applied here.
     const retained = findRetainedSnapshots(session, pluginName)
+
+    if (!config.recallPreserve) {
+      const latest = retained[0]
+      // Identical recall: the newest snapshot already carries this text on
+      // the surface. Replacing it would be churn — and a marker row would
+      // dangle, pointing at the snapshot it just removed. Leave the
+      // snapshot untouched (it is current).
+      if (latest !== undefined && latest.text === text) return decision
+      const snapshot = createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', sections: [{ name: pluginName, text }] },
+      })
+      try {
+        if (latest !== undefined) {
+          // Replace the previously retained snapshot in place: `startSeq` /
+          // `endSeq` target its single surface node (the replace lands at
+          // that node's position), and `sourceEventSeqs` names every
+          // shadowed node (the surface enforces this). The shadow price —
+          // its heuristic tokens — rides the log-only `compaction/prune`
+          // appended immediately before, so the token meter folds the
+          // replace as new minus the shadowed range.
+          const seq = latest.seq
+          const price = estimateSnapshotTokens(latest.message)
+          if (price !== undefined) {
+            session.append('compaction/prune', {
+              shadowedRange: { start: seq, end: seq },
+              shadowedSeqs: [seq],
+              shadowedTokenCount: price,
+            })
+          }
+          session.append('user/message', snapshot, {
+            surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
+            sourceEventSeqs: [seq],
+          })
+        } else {
+          // No prior snapshot (the first turn): append it plainly.
+          session.append('user/message', snapshot, { surfaceOp: 'append' })
+        }
+        // The snapshot was committed directly to the surface; nothing
+        // rides the pre-step decision.
+        return decision
+      } catch {
+        // The direct replace failed (a seq no longer on the surface, a
+        // rejected append, …). Degrade to the append-only path below so the
+        // turn never breaks. An orphaned `compaction/prune` from the failed
+        // replace is harmless: its shadow-price claim is dropped by the
+        // next event, so the meter stays consistent.
+      }
+    }
+
+    // Append-only — the default mode, and the degrade for a failed replace.
+    // The snapshot rides the pre-step decision, so the loop appends it to
+    // this turn's step right after the triggering message. An identical
+    // recall commits the marker row instead of a duplicate block (no
+    // churn, but the turn still gets its row naming the memories it
+    // applied).
     const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, rules) : text
-    const snapshot = createUserMessage({
+    const appended = createUserMessage({
       content: [{ type: 'text', text: committed }],
       source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', sections: [{ name: pluginName, text: committed }] },
     })
-    // The snapshot rides the pre-step decision, so the loop appends it to
-    // this turn's step right after the triggering message. The plugin only
-    // ever appends: every snapshot stays in the model context, and the
-    // durable log keeps each one for replay and audit.
-    return { kind: 'enter', messages: [...decision.messages, snapshot] }
+    return { kind: 'enter', messages: [...decision.messages, appended] }
   }
 
   const preStep = async ({ agent, messages, step, signal }: PreStepPayload, next: () => Promise<PreStepDecision>): Promise<PreStepDecision> => {

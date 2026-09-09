@@ -50,15 +50,26 @@ tree — preserve them when you change anything:
    every automatic lookup is bounded by `autoContextTimeoutMs`, every tool
    failure degrades to a clean error, and retention/lookup errors are
    contained, logged, and never propagated into the agent loop.
-6. **The model's context is an append-only surface.** The auto-recall
-   snapshot is only ever appended — the plugin never replaces or erases a
+6. **The model's context is append-only by default — opt-in replacement
+   behind `recallPreserve: false`.** By default the auto-recall snapshot
+   is only ever appended — the plugin never replaces or erases a
    previous turn's snapshot. An identical recall re-commits no duplicate
    block (no churn) — the turn instead gets a marker row
    (`renderUnchanged`) naming the applied memories one compact line each,
    so the UI still shows exactly what memory was applied that turn; an
-   empty recall leaves existing snapshots in place. Rewriting
-   earlier turns (tombstones / `latestOnly`) was tried and rejected — do
-   not resurrect it.
+   empty recall leaves existing snapshots in place. `recallPreserve:
+   false` (the naming mirrors llama-server's `--no-reasoning-preserve`)
+   commits the snapshot directly in the pre-step listener: each new one
+   replaces the previously retained one in place via a `surfaceOp`
+   replace, shadow-priced by a log-only `compaction/prune` appended
+   immediately before (its `shadowedTokenCount` comes from the optional
+   `tokenMeter` service — absent meter means no price, a safe
+   overcount). The durable log keeps every snapshot; an unchanged recall
+   is a pure no-op (no marker, no replace); a refused replace degrades
+   to the append path so a turn never breaks. This is the only rewrite
+   the plugin performs, it is the default-off behavior the operator
+   opts into, and the replace never rides the pre-step decision (the
+   loop hardcodes `append` there).
 7. **The tool description IS the retention policy.** WHAT and WHEN the model
    stores is decided by the description text in `src/tool.ts` (durable
    facts, preferences, decisions + rationale; never ephemera or raw code).
@@ -117,7 +128,7 @@ tree — preserve them when you change anything:
 | `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup) + surface commit, and `agent/disposed` cleanup |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 44 checks, ten mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 48 checks, eleven mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot replacing the previous one in place (shadow-priced by the adjacent log-only `compaction/prune`, the durable log keeping both), an unchanged recall committing nothing, a refused replace degrading to the append path with the orphaned price harmless) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |
@@ -135,7 +146,7 @@ TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
 
-# the stub suite (44 checks)
+# the stub suite (48 checks)
 cd test && node --import ./register.mjs test.mjs
 
 # preset-mount verification (the custom agent preset row)
@@ -186,7 +197,10 @@ HINDSIGHT_API_KEY=<key> node --import ./register.mjs live.mjs
 - The bare `hindsight` name is kept for the **tool name**, the error
   prefixes, and the preset row `id`; the package/plugin is
   `dsh-plugin-hindsight-advanced` (the bare name stays reserved).
-- Snapshots are append-only; no turn rewriting.
+- Snapshots are append-only UNLESS the operator sets `recallPreserve:
+  false` — then the surface carries only the latest snapshot (a direct
+  in-place replace, shadow-priced by an adjacent log-only
+  `compaction/prune`), and the durable log still keeps every snapshot.
 - Subagent auto-recall stays skipped, and a subagent's `session` tier leans
   at the parent that delegated its task.
 - The bank-config sync is a lazy one-time `PATCH` that rides the next

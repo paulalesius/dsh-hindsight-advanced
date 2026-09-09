@@ -65,7 +65,7 @@ const resolved = plugin.Config['~standard'].validate({
   baseUrl: BASE,
   apiKeyRef: API_KEY_REF,
   autoContext: true,
-  maxRecallTokens: 1024,
+  maxRecallTokens: 4096,
   autoContextTimeoutMs: 2500,
   bankConfig: { retain_mission: MISSION },
 })

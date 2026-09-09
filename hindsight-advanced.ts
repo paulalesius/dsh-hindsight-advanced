@@ -71,14 +71,23 @@
  *   budget). Subagent sessions are skipped, so a slow or stopped Hindsight
  *   server never blocks a turn.
  *
- *   The snapshot is only ever appended — the plugin never replaces or
- *   erases a previous turn's snapshot — so the model context accumulates one
- *   snapshot per distinct turn, while the durable log keeps every snapshot
- *   for replay and audit. An identical recall re-commits no duplicate
- *   block (no churn) — the turn instead gets a marker row naming the
- *   applied memories (one compact line each), so the UI still shows
- *   exactly what memory was applied that turn; an empty recall leaves the
- *   existing snapshots in place.
+  *   The snapshot is append-only by default (`recallPreserve: true`): the
+ *   plugin never replaces or erases a previous turn's snapshot, so the
+ *   model context accumulates one snapshot per distinct turn, while the
+ *   durable log keeps every snapshot for replay and audit. An identical
+ *   recall re-commits no duplicate block (no churn) — the turn instead
+ *   gets a marker row naming the applied memories (one compact line each),
+ *   so the UI still shows exactly what memory was applied that turn; an
+ *   empty recall leaves the existing snapshots in place.
+ *
+ *   `recallPreserve: false` instead keeps the surface to the LATEST
+ *   snapshot: each new one replaces the previously retained one in place
+ *   (the session surface's `replace` op, priced through the shadow-price
+ *   `compaction/prune` metering event) while the durable log keeps every
+ *   snapshot for replay and audit. A failed replace degrades to the append
+ *   path, so the turn never breaks. The naming matches the llama-server
+ *   `--no-reasoning-preserve` flag: with it off, the server keeps each
+ *   turn's reasoning only for that turn.
  *
  * Visibility tiers (the plugin's tag model — the model never sees tags):
  * the plugin tags every stored memory with at most ONE tier's tag, and the
@@ -128,10 +137,19 @@
  *   line per message, capped at 1000 chars with the OLDEST lines
  *   dropping first (the anchor stays whole). `1` restores the
  *   single-message query.
+ * - `recallPreserve` — default `true`: the model surface is append-only
+ *   for the snapshots — every committed recall stays in the model context.
+ *   `false`: the surface carries only the LATEST snapshot — each new one
+ *   replaces the previously retained one in place (the session surface's
+ *   `replace` op, priced through the shadow-price `compaction/prune`
+ *   metering event) while the durable log keeps every snapshot for replay
+ *   and audit. Matches the llama-server `--no-reasoning-preserve` naming:
+ *   with it off, a turn's snapshot, like its reasoning, lives for that
+ *   turn only.
  * - `retainAsync` — default `false` (synchronous: the retain call waits for
  *   the bank to process the memory); `true` acknowledges fast and runs fact
  *   extraction in the background.
- * - `maxRecallTokens` — recall response budget; default `1024`.
+ * - `maxRecallTokens` — recall response budget; default `4096`.
  * - `autoContextTimeoutMs` — bound for the automatic lookup; default `2500`.
  * - `retainScope` — the visibility tier `retain` uses when the model omits
  *   the `scope` parameter: `global` | `preset` | `session`; default
@@ -218,8 +236,11 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
 
   // One mount owns all three auto-recall listeners: pre-step consumes the
   // slot, turn-stopping fills it, disposal clears it — the slot map lives
-  // in the closure they share.
-  const autoRecall = buildAutoRecall(mount, name)
+  // in the closure they share. `ctx` is threaded for the recallPreserve
+  // shadow price (an untyped `ctx.get('tokenMeter')` at commit time —
+  // optional, so a composition without the meter degrades to an unpriced
+  // replace).
+  const autoRecall = buildAutoRecall(mount, name, ctx)
 
   ctx.on('agent/pre-step', autoRecall.preStep, { prepend: true })
   ctx.on('agent/turn-stopping', autoRecall.turnStopping)

@@ -37,6 +37,15 @@ export interface ResolvedConfig {
    *  replies between them), the whole thing capped at the query bound with
    *  the anchor kept whole and the oldest context dropping first. */
   recallContextTurns: number
+  /** `true` (default): the model surface is append-only for the snapshots —
+   *  every committed recall stays in the model context. `false`: the
+   *  surface carries only the LATEST snapshot — each new one replaces the
+   *  previously retained one (the session surface's `replace` op, priced
+   *  through the shadow-price `compaction/prune` metering event) while the
+   *  durable log keeps every snapshot for replay and audit. Naming matches
+   *  the llama-server `--no-reasoning-preserve` flag: with it off, the
+   *  server keeps each turn's reasoning only for that turn. */
+  recallPreserve: boolean
   /** `true`: retain acknowledges fast and runs fact extraction in the
    *  background; `false` (default): the retain call waits for the bank to
    *  process the memory before returning. */
@@ -55,7 +64,7 @@ export interface ResolvedConfig {
 }
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8888'
-const DEFAULT_MAX_RECALL_TOKENS = 1024
+const DEFAULT_MAX_RECALL_TOKENS = 4096
 const DEFAULT_AUTO_CONTEXT_TIMEOUT_MS = 2500
 /** How many recent turns the automatic recall composes into its query
  *  (the reference Hindsight integrations' default is 1; the plugin's is 5
@@ -212,6 +221,7 @@ export const Config: {
         autoContext: boolFlag(record, 'autoContext', true, issues),
         prefetch: boolFlag(record, 'prefetch', true, issues),
         recallContextTurns: intFlag(record, 'recallContextTurns', DEFAULT_RECALL_CONTEXT_TURNS, issues),
+        recallPreserve: boolFlag(record, 'recallPreserve', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),
         autoContextTimeoutMs: intFlag(record, 'autoContextTimeoutMs', DEFAULT_AUTO_CONTEXT_TIMEOUT_MS, issues),

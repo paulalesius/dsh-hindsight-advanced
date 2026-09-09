@@ -55,12 +55,22 @@
         # ship.
         recallContextTurns: 5
 
+        # true — the model surface is append-only: every committed recall
+        # snapshot stays in the model context. false — the surface carries
+        # only the LATEST snapshot: each new one replaces the previously
+        # retained one in place (its tokens are shadow-priced out of the
+        # metering), while the durable log keeps every snapshot for replay
+        # and audit. Matches the llama-server --no-reasoning-preserve
+        # naming: with it off, a turn's snapshot, like its reasoning,
+        # lives for that turn only.
+        recallPreserve: true
+
         # false — retain waits for the bank to process the memory, so the very
         # next recall already sees it. true — fast ack, background extraction.
         retainAsync: false
 
-        # 1024 — token budget for recall responses.
-        maxRecallTokens: 1024
+        # 4096 — token budget for recall responses.
+        maxRecallTokens: 4096
 
         # 2500 — bound for the automatic lookup; a stopped/slow server never
         # blocks a turn.

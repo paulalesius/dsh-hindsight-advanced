@@ -9,7 +9,7 @@
  * @module dsh-plugin-hindsight-advanced/snapshot
  */
 
-import type { AssistantMessage, Session, UserMessage } from '@deepseek-ai/dsh-session'
+import type { AssistantMessage, Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { DirectiveRule, RecallHit } from './types.ts'
 
@@ -251,16 +251,16 @@ function snapshotText(message: UserMessage): string {
  * snapshot message as well, but its text never equals a rendered recall,
  * so it can never trigger the comparison).
  */
-export function findRetainedSnapshots(session: Session, pluginName: string): { seq: number; text: string }[] {
+export function findRetainedSnapshots(session: Session, pluginName: string): { seq: SessionSeq; text: string; message: UserMessage }[] {
   const onSurface = new Set(session.surface.nodes)
   const events = session.snapshotEvents()
-  const retained: { seq: number; text: string }[] = []
+  const retained: { seq: SessionSeq; text: string; message: UserMessage }[] = []
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event === undefined || event.type !== 'user/message') continue
     const source = event.data.source
     if (source.kind !== 'plugin' || source.plugin !== pluginName) continue
-    if (onSurface.has(event.seq)) retained.push({ seq: event.seq, text: snapshotText(event.data) })
+    if (onSurface.has(event.seq)) retained.push({ seq: event.seq, text: snapshotText(event.data), message: event.data })
   }
   return retained
 }
