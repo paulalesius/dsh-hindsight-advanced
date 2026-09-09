@@ -59,17 +59,27 @@ tree — preserve them when you change anything:
    so the UI still shows exactly what memory was applied that turn; an
    empty recall leaves existing snapshots in place. `recallPreserve:
    false` (the naming mirrors llama-server's `--no-reasoning-preserve`)
-   commits the snapshot directly in the pre-step listener: each new one
-   replaces the previously retained one in place via a `surfaceOp`
-   replace, shadow-priced by a log-only `compaction/prune` appended
-   immediately before (its `shadowedTokenCount` comes from the optional
-   `tokenMeter` service — absent meter means no price, a safe
-   overcount). The durable log keeps every snapshot; an unchanged recall
-   is a pure no-op (no marker, no replace); a refused replace degrades
-   to the append path so a turn never breaks. This is the only rewrite
-   the plugin performs, it is the default-off behavior the operator
-   opts into, and the replace never rides the pre-step decision (the
-   loop hardcodes `append` there).
+   keeps the surface to the LATEST full snapshot with an in-place
+   record of every earlier recall turn: each new snapshot retires the
+   previously retained full card via a `surfaceOp` replace that installs
+   a TOMBSTONE (`renderTombstone`) in the old slot — a tiny
+   `form: 'notice'` one-line marker the UI renders as a collapsed row,
+   so every past recall turn keeps a visible marker WHERE it recalled —
+   shadow-priced by a log-only `compaction/prune` appended immediately
+   before (its `shadowedTokenCount` is the old card's full price from
+   the optional `tokenMeter` service — absent meter means no price, a
+   safe overcount; the fold then prices the replace as the tiny
+   tombstone minus the shadowed range). The FULL new snapshot then
+   rides the pre-step decision, which the loop appends as a fresh card
+   after the triggering message. The durable log keeps every full
+   snapshot (tombstones never count as snapshots — `form: 'notice'`);
+   an unchanged recall is a pure no-op (no marker, no retire); a
+   refused retirement degrades to the append path (old card stays, new
+   full card rides the decision) so a turn never breaks. The in-place
+   part is the only rewrite the plugin performs, it is the default-off
+   behavior the operator opts into, and the fresh full card never
+   commits directly (the loop hardcodes `append` on the decision,
+   which is exactly where the card wants to land).
 7. **The tool description IS the retention policy.** WHAT and WHEN the model
    stores is decided by the description text in `src/tool.ts` (durable
    facts, preferences, decisions + rationale; never ephemera or raw code).
@@ -128,7 +138,7 @@ tree — preserve them when you change anything:
 | `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup) + surface commit, and `agent/disposed` cleanup |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 48 checks, eleven mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot replacing the previous one in place (shadow-priced by the adjacent log-only `compaction/prune`, the durable log keeping both), an unchanged recall committing nothing, a refused replace degrading to the append path with the orphaned price harmless) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 48 checks, eleven mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot retiring the previous full card in place — a `form: 'notice'` tombstone marker in the old slot, shadow-priced by the adjacent log-only `compaction/prune` (old card's full price), while the full new card lands fresh after the triggering message on the decision (the durable log keeping both full snapshots) — an unchanged recall committing nothing, a refused retirement degrading to the append path with the orphaned price harmless) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |
@@ -198,9 +208,12 @@ HINDSIGHT_API_KEY=<key> node --import ./register.mjs live.mjs
   prefixes, and the preset row `id`; the package/plugin is
   `dsh-plugin-hindsight-advanced` (the bare name stays reserved).
 - Snapshots are append-only UNLESS the operator sets `recallPreserve:
-  false` — then the surface carries only the latest snapshot (a direct
-  in-place replace, shadow-priced by an adjacent log-only
-  `compaction/prune`), and the durable log still keeps every snapshot.
+  false` — then the surface carries only the latest FULL snapshot: each
+  new one retires the previous full card in place (a `form: 'notice'`
+  tombstone in the old slot, shadow-priced by an adjacent log-only
+  `compaction/prune`) and lands fresh at its own turn on the decision,
+  and the durable log still keeps every full snapshot (tombstones never
+  count as snapshots).
 - Subagent auto-recall stays skipped, and a subagent's `session` tier leans
   at the parent that delegated its task.
 - The bank-config sync is a lazy one-time `PATCH` that rides the next

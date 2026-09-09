@@ -23,12 +23,15 @@
 // and the automatic pre-step recall: with recallPreserve (default) the
 // snapshot rows ride the pre-step decision (landing AFTER the triggering
 // message) and are only ever appended; with recallPreserve: false the
-// surface carries only the LATEST snapshot — each new one replaces the
-// previously retained one in place (the durable log keeps every one), an
-// unchanged recall commits nothing (the snapshot is already current);
-// in both modes an identical recall in preserve mode commits a marker row
-// — naming the applied memories one compact line each — instead of a
-// duplicate block, so every applied recall has a visible row.
+// surface carries only the LATEST full snapshot — each new one retires
+// the previous full card in place (a tiny `form: 'notice'` tombstone
+// marker at the old turn, shadow-priced by an adjacent log-only
+// compaction/prune) and lands fresh as a full card at its own turn (the
+// durable log keeps every full snapshot; an unchanged recall commits
+// nothing — the snapshot is already current);
+// in preserve mode an identical recall commits a marker row — naming the
+// applied memories one compact line each — instead of a duplicate block,
+// so every applied recall has a visible row.
 // The recall starts AHEAD of the turn that pays for it (the turn-stopping
 // prefetch): the detached job queries the turn's own human message while
 // the user is reading or typing, the next step consumes the cache with no
@@ -1133,7 +1136,7 @@ async function runStep(listener, a, step, messages) {
   // mode) and the decision carries only the turn's message.
   const d1 = await runStep(listener, kate, 1, [userMsg('which editor does user K prefer?')])
   assert.equal(d1.kind, 'enter')
-  assert.equal(d1.messages.length, 1, 'replace mode commits directly — the snapshot never rides the decision')
+  assert.equal(d1.messages.length, 1, 'the first snapshot commits directly — it never rides the decision')
   const snaps1 = snapshots(kate.session)
   assert.equal(snaps1.length, 1)
   assert.equal(snaps1[0].surfaceOp, 'append', 'the first snapshot is a plain append')
@@ -1143,22 +1146,35 @@ async function runStep(listener, a, step, messages) {
   assert.equal(deriveMessages(kate.session).length, 2, 'model context: the snapshot + the message')
   console.log('ok  mount K: the first snapshot is a plain append, committed before the message (direct, not via the decision)')
 
-  // Turn 2 (different recall): the new snapshot REPLACES the first one in
-  // place — the retired tokens ride a log-only compaction/prune appended
-  // immediately before, and the durable log keeps both snapshots.
+  // Turn 2 (different recall): the previous full card is RETIRED in place
+  // — a tiny `form: 'notice'` tombstone marker takes its slot (shadow-
+  // priced by a log-only compaction/prune appended immediately before),
+  // while the FULL new snapshot rides the pre-step decision and is
+  // appended as a fresh card after this turn's message. The durable log
+  // keeps every full snapshot.
   const d2 = await runStep(listener, kate, 1, [userMsg('how does kbuild compile?')])
-  assert.equal(d2.messages.length, 1, 'the replace never rides the decision either')
+  assert.equal(d2.messages.length, 2, 'the fresh full snapshot rides the decision; the retirement commits directly')
   const snaps2 = snapshots(kate.session)
-  assert.equal(snaps2.length, 2, 'the durable log keeps both snapshots')
+  assert.equal(snaps2.length, 2, 'the durable log keeps both full snapshots')
   const oldSnap = snaps2[0]
   const newSnap = snaps2[1]
-  assert.ok(!onSurface(kate.session, oldSnap), 'the old snapshot is shadowed')
-  assert.ok(onSurface(kate.session, newSnap))
-  assert.deepEqual(newSnap.surfaceOp, { op: 'replace', startSeq: oldSnap.seq, endSeq: oldSnap.seq })
-  assert.deepEqual(newSnap.sourceEventSeqs, [oldSnap.seq], 'the replace cites the shadowed node')
-  assert.equal(kate.session.surface.nodes.length, 3, 'the surface carries one snapshot + both user messages')
-  assert.equal(kate.session.surface.nodes[0], newSnap.seq, 'the new snapshot takes the old one\'s position (before both messages)')
+  assert.ok(!onSurface(kate.session, oldSnap), 'the old full card is retired from the surface')
+  assert.ok(onSurface(kate.session, newSnap), 'the fresh full card is on the surface')
+  assert.equal(newSnap.surfaceOp, 'append', 'the fresh card is a plain append at its own turn')
   assert.match(newSnap.data.content[0].text, /compiles with strict pnpm/)
+  assert.equal(kate.session.surface.nodes[kate.session.surface.nodes.length - 1], newSnap.seq, 'the fresh card lands AFTER the triggering message')
+  const tombstones = kate.session.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin' && event.data.source.form === 'notice')
+  assert.equal(tombstones.length, 1, 'one tombstone for one retirement')
+  const tomb = tombstones[0]
+  assert.deepEqual(tomb.surfaceOp, { op: 'replace', startSeq: oldSnap.seq, endSeq: oldSnap.seq }, 'the tombstone takes the old card\'s slot')
+  assert.deepEqual(tomb.sourceEventSeqs, [oldSnap.seq], 'the replace cites the shadowed node')
+  assert.ok(onSurface(kate.session, tomb))
+  assert.equal(kate.session.surface.nodes[0], tomb.seq, 'the tombstone sits in place — before both messages, at the turn that recalled')
+  assert.equal(tomb.data.source.plugin, 'hindsight-advanced')
+  assert.match(tomb.data.content[0].text, /preserve-off/, 'the tombstone names the bank')
+  assert.match(tomb.data.content[0].text, /refreshed/)
+  assert.ok(typeof tomb.data.source.summary === 'string' && tomb.data.source.summary.length > 0 && tomb.data.source.summary.length <= 120, 'the collapsed row\'s one-line account, bounded')
+  assert.equal(kate.session.surface.nodes.length, 4, 'the surface: tombstone, both user messages, fresh full card')
   const prunes = kate.session.events.filter(event => event.type === 'compaction/prune')
   assert.equal(prunes.length, 1, 'one shadow price for one retirement')
   assert.deepEqual(prunes[0].data, {
@@ -1166,25 +1182,28 @@ async function runStep(listener, a, step, messages) {
     shadowedSeqs: [oldSnap.seq],
     shadowedTokenCount: 7,
   })
-  assert.equal(kate.session.events.indexOf(prunes[0]), kate.session.events.indexOf(newSnap) - 1, 'the price is appended immediately before the replacing message (the meter fold requires the adjacency)')
+  assert.equal(kate.session.events.indexOf(prunes[0]), kate.session.events.indexOf(tomb) - 1, 'the price is appended immediately before the tombstone (the meter fold requires the adjacency)')
   assert.equal(kate.session.surface.nodes.includes(prunes[0].seq), false, 'the price is log-only, never a surface node')
-  console.log('ok  mount K: a new snapshot replaces the previous one in place (shadow-priced, the log keeps both)')
+  console.log('ok  mount K: a new recall retires the old card in place (tombstone, shadow-priced) and lands fresh at its own turn (log keeps both)')
 
-  // Turn 3 (identical recall): nothing is committed — the snapshot is
-  // already current, and a marker row would dangle, pointing at the
-  // snapshot it just retired.
+  // Turn 3 (identical recall): nothing is committed — the full card is
+  // already current, and retiring it would be churn (a second tombstone
+  // would dangle, pointing at the card it just removed).
   const d3 = await runStep(listener, kate, 1, [userMsg('how does kbuild compile?')])
-  assert.equal(d3.messages.length, 1, 'no duplicate block, no dangling marker')
+  assert.equal(d3.messages.length, 1, 'no duplicate card, no dangling tombstone')
   assert.equal(snapshots(kate.session).length, 2, 'an unchanged recall commits nothing in replace mode')
+  assert.equal(kate.session.events.filter(event => event.data.source?.kind === 'plugin' && event.data.source.form === 'notice').length, 1, 'no second tombstone either')
   assert.equal(kate.session.events.filter(event => event.type === 'compaction/prune').length, 1, 'no second price either')
-  assert.equal(kate.session.surface.nodes.length, 4, 'only the turn\'s message was appended')
-  assert.equal(kate.session.surface.nodes[0], newSnap.seq, 'the current snapshot stays in place')
+  assert.equal(kate.session.surface.nodes.length, 5, 'only the turn\'s message was appended')
+  assert.equal(kate.session.surface.nodes[0], tomb.seq, 'the tombstone stays in place')
+  assert.equal(kate.session.surface.nodes[3], newSnap.seq, 'the current full card stays at its turn (before the new message)')
   console.log('ok  mount K: an unchanged recall commits nothing (the snapshot is already current)')
 
   // Degrade: a session that refuses the replace append falls back to the
-  // append-only path (the turn never breaks); the orphaned
-  // compaction/prune left behind is harmless (the meter drops the claim on
-  // the next event).
+  // append-only path (the turn never breaks): no tombstone lands, the old
+  // full card stays, and the fresh full card rides the decision; the
+  // orphaned compaction/prune left behind is harmless (the meter drops
+  // the claim on the next event).
   const flaky = makeSession('sess-k2')
   const realAppend = flaky.append.bind(flaky)
   flaky.append = (type, data, opts = {}) => {
@@ -1198,15 +1217,16 @@ async function runStep(listener, a, step, messages) {
   assert.equal(denSnaps[0].surfaceOp, 'append', 'turn 1 (no prior snapshot) is a plain append')
   assert.ok(onSurface(flaky, denSnaps[0]))
   const d2den = await runStep(listener, den, 1, [userMsg('how does kbuild compile?')])
-  assert.equal(d2den.messages.length, 2, 'the failed replace degrades: the snapshot rides the decision')
+  assert.equal(d2den.messages.length, 2, 'the failed retirement degrades: the full snapshot rides the decision')
   const denSnaps2 = snapshots(flaky)
   assert.equal(denSnaps2.length, 2)
-  assert.ok(onSurface(flaky, denSnaps2[0]), 'the old snapshot stays')
-  assert.ok(onSurface(flaky, denSnaps2[1]), 'the degraded new snapshot is appended, both on the surface')
+  assert.ok(onSurface(flaky, denSnaps2[0]), 'the old full card stays')
+  assert.ok(onSurface(flaky, denSnaps2[1]), 'the degraded fresh card is appended, both on the surface')
   assert.equal(denSnaps2[1].surfaceOp, 'append')
+  assert.equal(flaky.events.filter(event => event.data.source?.kind === 'plugin' && event.data.source.form === 'notice').length, 0, 'no tombstone when the replace is refused')
   assert.equal(flaky.events.filter(event => event.type === 'compaction/prune').length, 1, 'the orphaned price stays in the log (harmless)')
-  assert.equal(flaky.surface.nodes.length, 4, 'snapshot, message, degraded snapshot, message')
-  console.log('ok  mount K: a refused replace degrades to the append path (turn never breaks, orphaned price harmless)')
+  assert.equal(flaky.surface.nodes.length, 4, 'old card, message, fresh card, message')
+  console.log('ok  mount K: a refused retirement degrades to the append path (turn never breaks, orphaned price harmless)')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

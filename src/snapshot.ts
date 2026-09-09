@@ -2,9 +2,12 @@
  * The automatic-recall surface logic: derive the recall query from the
  * step's messages, render hits as the model-facing memory text, render
  * the marker for an unchanged recall (the applied memories, one compact
- * line each), and find this mount's snapshots still on the model-visible
- * surface (an unchanged recall commits the marker instead of a duplicate
- * block).
+ * line each), render the tombstone a `recallPreserve: false` surface
+ * installs in place of a retired snapshot card (a one-line `notice`-form
+ * marker; the full card of the current recall is the one appended at its
+ * own turn), and find this mount's full snapshots still on the model-
+ * visible surface (an unchanged recall commits the marker instead of a
+ * duplicate block; tombstones are never snapshots).
  *
  * @module dsh-plugin-hindsight-advanced/snapshot
  */
@@ -80,6 +83,29 @@ export function renderUnchanged(bank: string, hits: RecallHit[], rules: Directiv
   }
   if (rules.length > 0) lines.push(`Standing rules from the bank unchanged — still in effect.`)
   return lines.join('\n')
+}
+
+/**
+ * The tombstone a `recallPreserve: false` surface installs in place of a
+ * RETIRED snapshot: when a new snapshot refreshes the context, the old full
+ * card is replaced — at its own slot, right where that turn's recall fired —
+ * by this one-line marker, while the full new snapshot is appended as a
+ * fresh card at its own turn. The model reads `text` (a few dozen tokens,
+ * vs. thousands for the card it stands in for: the retirement's meter delta
+ * is the tiny tombstone minus the retired card's full price); the UI shows
+ * `summary` on the collapsed row — `form: 'notice'` is the form whose whole
+ * point is a one-line account readable without expanding, so every past
+ * recall turn keeps a visible marker of WHERE it recalled without anyone
+ * scrolling, and the single full card at the latest recall turn is the
+ * content. The wording never lists a memory (that text is the card's job)
+ * and never equals a rendered recall (a tombstone can therefore never trip
+ * the unchanged-recall comparison).
+ */
+export function renderTombstone(bank: string): { text: string; summary: string } {
+  return {
+    text: `Hindsight bank "${bank}": a memory snapshot was applied on this turn and was later refreshed; the current snapshot is the newest one below.`,
+    summary: `memory snapshot applied here — refreshed later; the full text is the newest snapshot below`,
+  }
 }
 
 /** The latest user-visible text among the step's claimed messages, as a recall query. */
@@ -259,7 +285,13 @@ export function findRetainedSnapshots(session: Session, pluginName: string): { s
     const event = events[index]
     if (event === undefined || event.type !== 'user/message') continue
     const source = event.data.source
-    if (source.kind !== 'plugin' || source.plugin !== pluginName) continue
+    // Only FULL snapshot cards are retained: the tombstone a
+    // `recallPreserve: false` surface installs in place of a retired card
+    // is a plugin message of this same bank, but its `form: 'notice'`
+    // marks it as a marker, not a snapshot (its text never equals a
+    // rendered recall, so it could not match either — the form check just
+    // keeps the set honest).
+    if (source.kind !== 'plugin' || source.plugin !== pluginName || source.form !== 'snapshot') continue
     if (onSurface.has(event.seq)) retained.push({ seq: event.seq, text: snapshotText(event.data), message: event.data })
   }
   return retained

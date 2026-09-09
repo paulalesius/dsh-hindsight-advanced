@@ -45,30 +45,39 @@
  *   recall leaves the existing snapshots in place.
  *
  * - `recallPreserve: false`: the model surface carries only the LATEST
- *   snapshot. Each new one REPLACES the previously retained snapshot in
- *   place (the session surface's `replace` op, landing at the old snapshot's
- *   position) instead of appending a new row, so the surface holds a single,
- *   ever-refreshed snapshot. Because the loop appends decision messages with
- *   a hardcoded `append` surface op, the replace — and its shadow-price
- *   metering event — is committed by a direct, synchronous `session.append`
- *   pair (the `compaction/prune` metering record immediately before the
- *   replacing `user/message`, exactly the adjacency the token meter's
- *   shadow-price fold requires). An identical recall commits nothing (the
- *   snapshot is already current, so there is no churn and the row is left
- *   untouched). The durable log still keeps every snapshot for replay and
- *   audit; a replace that fails degrades to the append-only path so the turn
- *   never breaks.
+ *   full snapshot. When a new snapshot refreshes the context, the previous
+ *   full card is replaced IN PLACE at its own turn (the session surface's
+ *   `replace` op, landing at the old snapshot's position) by a TOMBSTONE — a
+ *   tiny `form: 'notice'` one-line marker ("a snapshot was applied on this
+ *   turn and was later refreshed; the current one is the newest below"),
+ *   while the FULL new snapshot rides the pre-step decision as a fresh card
+ *   appended at the triggering turn (the loop appends decision messages
+ *   with a hardcoded `append` surface op, which is exactly where the new
+ *   card wants to land). The surface then holds one tombstone per past
+ *   recall turn — a visible, in-place record of WHERE each recall fired —
+ *   plus exactly one full card, the latest, at its turn. Because the
+ *   retire-and-replace happens before the decision, it is committed by a
+ *   direct, synchronous `session.append` pair: the `compaction/prune`
+ *   shadow-price metering record for the old card's full price immediately
+ *   before the replacing `user/message` (the tombstone), exactly the
+ *   adjacency the token meter's shadow-price fold requires — so the meter
+ *   delta is the tombstone's few dozen tokens minus the retired card's full
+ *   price. An identical recall commits nothing (the snapshot is already
+ *   current, so there is no churn and the rows are left untouched). The
+ *   durable log still keeps every snapshot for replay and audit; a failed
+ *   replace degrades to the append-only path (tombstone skipped, the full
+ *   snapshot simply rides the decision) so the turn never breaks.
  *
  * @module dsh-plugin-hindsight-advanced/autorecall
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
-import { composeRecallQuery, findRetainedSnapshots, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderUnchanged } from './snapshot.ts'
+import { composeRecallQuery, findRetainedSnapshots, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
 import type { DirectiveRule, RecallHit } from './types.ts'
 
 /**
@@ -259,16 +268,20 @@ export function buildAutoRecall(
    *  the turn still gets its visible row, naming the memories it applied).
    *
    *  `recallPreserve: false`: the model surface carries only the LATEST
-   *  snapshot. The new one REPLACES the previously retained snapshot in
-   *  place via a direct, synchronous `session.append` pair — the shadow-
-   *  price `compaction/prune` (log-only) immediately BEFORE the replacing
+   *  full snapshot — one card per past recall turn's TOMBSTONE (a
+   *  `form: 'notice'` one-liner installed in place of the retired card, so
+   *  each recall turn keeps a visible, in-place marker) plus the single
+   *  current card at its own turn. The retirement is a direct,
+   *  synchronous `session.append` pair — the shadow-price
+   *  `compaction/prune` (log-only) immediately BEFORE the replacing
    *  `user/message`, the exact adjacency the token meter's shadow-price
-   *  fold requires — so the retired snapshot's tokens are subtracted and
-   *  the replace is priced as new minus shadowed. An identical recall
-   *  commits nothing (the snapshot is already current; a marker row would
-   *  dangle, pointing at the snapshot it just removed). The durable log
-   *  keeps every snapshot regardless. A failed replace degrades to the
-   *  append-only path so the turn never breaks; an orphaned
+   *  fold requires — so the replace is priced as the tiny tombstone minus
+   *  the retired card's full price; the FULL new snapshot then rides the
+   *  pre-step decision, which the loop appends after this turn's message.
+   *  An identical recall commits nothing (the snapshot is already
+   *  current). The durable log keeps every snapshot regardless. A failed
+   *  retirement degrades to the append-only path (the old card stays, the
+   *  new one rides the decision) so the turn never breaks; an orphaned
    *  `compaction/prune` from a failed replace is harmless on replay (its
    *  claim is dropped by the next event). */
   function commitSnapshot(
@@ -284,10 +297,10 @@ export function buildAutoRecall(
 
     if (!config.recallPreserve) {
       const latest = retained[0]
-      // Identical recall: the newest snapshot already carries this text on
-      // the surface. Replacing it would be churn — and a marker row would
-      // dangle, pointing at the snapshot it just removed. Leave the
-      // snapshot untouched (it is current).
+      // Identical recall: the newest full snapshot already carries this
+      // text on the surface (a tombstone never matches a rendered recall).
+      // Retiring it would be churn — and it is already current. Leave the
+      // rows untouched.
       if (latest !== undefined && latest.text === text) return decision
       const snapshot = createUserMessage({
         content: [{ type: 'text', text }],
@@ -295,15 +308,28 @@ export function buildAutoRecall(
       })
       try {
         if (latest !== undefined) {
-          // Replace the previously retained snapshot in place: `startSeq` /
-          // `endSeq` target its single surface node (the replace lands at
-          // that node's position), and `sourceEventSeqs` names every
-          // shadowed node (the surface enforces this). The shadow price —
-          // its heuristic tokens — rides the log-only `compaction/prune`
-          // appended immediately before, so the token meter folds the
-          // replace as new minus the shadowed range.
+          // Retire the previous full snapshot IN PLACE at its own turn and
+          // install a TOMBSTONE in its slot (a `form: 'notice'` one-liner —
+          // the UI renders it as a collapsed row, so every past recall turn
+          // keeps a visible marker of where it recalled without the card's
+          // thousands of tokens), while the FULL new snapshot rides the
+          // pre-step decision below: the loop appends decision messages
+          // with a hardcoded `append` op, landing it as a fresh card right
+          // after this turn's message. `startSeq` / `endSeq` target the
+          // old card's single surface node (the replace lands at that
+          // node's position), and `sourceEventSeqs` names the shadowed
+          // node (the surface enforces this). The shadow price — the old
+          // card's heuristic tokens — rides the log-only
+          // `compaction/prune` appended immediately before, so the token
+          // meter folds the replace as the tiny tombstone minus the
+          // shadowed range.
           const seq = latest.seq
           const price = estimateSnapshotTokens(latest.message)
+          const tombstone = renderTombstone(config.bank)
+          const marker = createUserMessage({
+            content: [{ type: 'text', text: tombstone.text }],
+            source: { kind: 'plugin', plugin: pluginName, form: 'notice', summary: boundContextSummary(tombstone.summary) },
+          })
           if (price !== undefined) {
             session.append('compaction/prune', {
               shadowedRange: { start: seq, end: seq },
@@ -311,23 +337,25 @@ export function buildAutoRecall(
               shadowedTokenCount: price,
             })
           }
-          session.append('user/message', snapshot, {
+          session.append('user/message', marker, {
             surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
             sourceEventSeqs: [seq],
           })
-        } else {
-          // No prior snapshot (the first turn): append it plainly.
-          session.append('user/message', snapshot, { surfaceOp: 'append' })
+          return { kind: 'enter', messages: [...decision.messages, snapshot] }
         }
-        // The snapshot was committed directly to the surface; nothing
-        // rides the pre-step decision.
+        // No prior full snapshot (the first turn): append it plainly,
+        // committed directly — the card lands on the surface before the
+        // triggering message, never riding the decision.
+        session.append('user/message', snapshot, { surfaceOp: 'append' })
         return decision
       } catch {
-        // The direct replace failed (a seq no longer on the surface, a
+        // The direct retirement failed (a seq no longer on the surface, a
         // rejected append, …). Degrade to the append-only path below so the
-        // turn never breaks. An orphaned `compaction/prune` from the failed
-        // replace is harmless: its shadow-price claim is dropped by the
-        // next event, so the meter stays consistent.
+        // turn never breaks: the old card stays on the surface, and the new
+        // full snapshot simply rides the decision. An orphaned
+        // `compaction/prune` from the failed replace is harmless: its
+        // shadow-price claim is dropped by the next event, so the meter
+        // stays consistent.
       }
     }
 

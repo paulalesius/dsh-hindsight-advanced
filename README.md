@@ -76,7 +76,7 @@ Two things to know about the row:
 | `autoContext` | `true` | Set `false` to turn off the automatic per-turn recall (the `hindsight` tool stays). |
 | `prefetch` | `true` | `true` (default): the recall starts as the *previous* turn ends, so from the second turn on it targets the previous message. `false`: every turn queries the message you just sent and waits on the server for it — the memory is always relevant to what you just said, at the cost of the server's latency on every first model call. |
 | `recallContextTurns` | `5` | How many of your recent turns ride along in the recall's query, so the bank can match memories against what the conversation was about, not just the last message. The query is the anchor message under a `Prior context:` block of the recent prior turns (one line per user/assistant message), capped at 1000 characters with the oldest lines dropped first. `1` (what the reference integrations ship) is the plain single-message query. |
-| `recallPreserve` | `true` | `true` (the default): the model context is append-only — every committed recall snapshot stays in the conversation, so later turns see the memories that were recalled earlier. `false`: the model context carries only the *latest* snapshot — each new one replaces the previous one in place (its tokens are metered out of the pricing), while the durable session log keeps every snapshot for replay and audit. The naming matches llama-server's `--no-reasoning-preserve`: with it off, a turn's snapshot, like its reasoning, lives for that turn only. |
+| `recallPreserve` | `true` | `true` (the default): the model context is append-only — every committed recall snapshot stays in the conversation, so later turns see the memories that were recalled earlier. `false`: the model context carries only the *latest* full snapshot — each new one retires the previous full card in place (a one-line tombstone marker stays where that turn's recall fired, its full tokens metered out of the pricing) and lands as a fresh card at its own turn, while the durable session log keeps every full snapshot for replay and audit. The naming matches llama-server's `--no-reasoning-preserve`: with it off, a turn's snapshot, like its reasoning, lives for that turn only. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `4096` | How much memory to bring back per recall. |
 | `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. Because the lookup runs ahead (below), most turns never pay this; a slow or stopped server never blocks the agent. |
@@ -106,11 +106,14 @@ was applied without the whole block repeating.
 The notes are append-only by default (`recallPreserve: true`): every
 turn's snapshot stays in the model context, so the agent keeps seeing
 what it recalled earlier. Set `recallPreserve: false` to keep the context
-lean — each new note replaces the previous one in place, so only the
-latest recall stays on the model's surface (the full history remains in
-the session log for replay). The naming matches llama-server's
+lean — each new note retires the previous full card in place: a one-line
+marker stays where that turn's recall fired (so you can always see WHERE
+in the conversation a recall happened, without scrolling), while the
+full note lands as a fresh card at its own turn — only the latest full
+recall stays on the model's surface (the full history of cards remains
+in the session log for replay). The naming matches llama-server's
 `--no-reasoning-preserve`: with it off, a turn's snapshot, like its
-reasoning, lives for that turn only. The price is that a replaced turn
+reasoning, lives for that turn only. The price is that a retired card
 restarts the model's cached prefix.
 
 ### Giving the plugin its key

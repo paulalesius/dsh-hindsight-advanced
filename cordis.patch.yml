@@ -57,12 +57,13 @@
 
         # true — the model surface is append-only: every committed recall
         # snapshot stays in the model context. false — the surface carries
-        # only the LATEST snapshot: each new one replaces the previously
-        # retained one in place (its tokens are shadow-priced out of the
-        # metering), while the durable log keeps every snapshot for replay
-        # and audit. Matches the llama-server --no-reasoning-preserve
-        # naming: with it off, a turn's snapshot, like its reasoning,
-        # lives for that turn only.
+        # only the LATEST full snapshot: each new one retires the
+        # previously retained full card in place (a one-line tombstone
+        # marker in the old slot, shadow-priced out of the metering) and
+        # lands fresh at its own turn, while the durable log keeps every
+        # full snapshot for replay and audit. Matches the llama-server
+        # --no-reasoning-preserve naming: with it off, a turn's snapshot,
+        # like its reasoning, lives for that turn only.
         recallPreserve: true
 
         # false — retain waits for the bank to process the memory, so the very

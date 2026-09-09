@@ -80,12 +80,15 @@
  *   so the UI still shows exactly what memory was applied that turn; an
  *   empty recall leaves the existing snapshots in place.
  *
- *   `recallPreserve: false` instead keeps the surface to the LATEST
- *   snapshot: each new one replaces the previously retained one in place
- *   (the session surface's `replace` op, priced through the shadow-price
- *   `compaction/prune` metering event) while the durable log keeps every
- *   snapshot for replay and audit. A failed replace degrades to the append
- *   path, so the turn never breaks. The naming matches the llama-server
+ *   `recallPreserve: false` instead keeps the surface to the LATEST full
+ *   snapshot: each new one retires the previously retained full card IN
+ *   PLACE at its own turn — a one-line `notice`-form TOMBSTONE marker takes
+ *   the old slot (priced through the shadow-price `compaction/prune`
+ *   metering event), so every past recall turn keeps a visible marker
+ *   where it recalled — while the full new card lands as a fresh card at
+ *   its own turn. The durable log keeps every full snapshot for replay and
+ *   audit. A failed retirement degrades to the append path, so the turn
+ *   never breaks. The naming matches the llama-server
  *   `--no-reasoning-preserve` flag: with it off, the server keeps each
  *   turn's reasoning only for that turn.
  *
@@ -139,13 +142,13 @@
  *   single-message query.
  * - `recallPreserve` — default `true`: the model surface is append-only
  *   for the snapshots — every committed recall stays in the model context.
- *   `false`: the surface carries only the LATEST snapshot — each new one
- *   replaces the previously retained one in place (the session surface's
- *   `replace` op, priced through the shadow-price `compaction/prune`
- *   metering event) while the durable log keeps every snapshot for replay
- *   and audit. Matches the llama-server `--no-reasoning-preserve` naming:
- *   with it off, a turn's snapshot, like its reasoning, lives for that
- *   turn only.
+ *   `false`: the surface carries only the LATEST full snapshot — each new
+ *   one retires the previously retained full card in place (a one-line
+ *   tombstone marker in the old slot, priced through the shadow-price
+ *   `compaction/prune` metering event) and lands fresh at its own turn,
+ *   while the durable log keeps every full snapshot for replay and audit.
+ *   Matches the llama-server `--no-reasoning-preserve` naming: with it
+ *   off, a turn's snapshot, like its reasoning, lives for that turn only.
  * - `retainAsync` — default `false` (synchronous: the retain call waits for
  *   the bank to process the memory); `true` acknowledges fast and runs fact
  *   extraction in the background.
