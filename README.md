@@ -73,10 +73,12 @@ Two things to know about the row:
 | `baseUrl` | `http://127.0.0.1:8888` | Your Hindsight server's address. |
 | `apiKeyRef` | — | **The way to give the plugin its key** — a *name* for the secret, not the secret itself. The value is looked up on every call (environment → `~/.dsh/.credentials.yaml` → `.env` files), so rotating the key needs no restart and the key never sits in a config file. See below. |
 | `apiKey` | — | A plain key in the config, instead of a reference. Prefer `apiKeyRef`. |
-| `autoContext` | `true` | Set `false` to turn off the automatic recall (each turn's first step and any human intervention claimed mid-turn; the `hindsight` tool stays). |
+| `autoContext` | `true` | Set `false` to turn off the automatic recall (each turn's first step, any human intervention claimed mid-turn, and the mid-step agent-output recall; the `hindsight` tool stays). |
 | `prefetch` | `true` | `true` (default): the recall starts as the *previous* turn ends, so from the second turn on it targets the previous message. `false`: every turn queries the message you just sent and waits on the server for it — the memory is always relevant to what you just said, at the cost of the server's latency on every first model call. |
 | `recallContextTurns` | `5` | How many of your recent turns ride along in the recall's query, so the bank can match memories against what the conversation was about, not just the last message. The query is the anchor message under a `Prior context:` block of the recent prior turns (one line per user/assistant message), capped at 1000 characters with the oldest lines dropped first. `1` (what the reference integrations ship) is the plain single-message query. |
 | `recallPreserve` | `true` | `true` (the default): the model context is append-only — every committed recall snapshot stays in the conversation, so later turns see the memories that were recalled earlier. `false`: the model context carries only the *latest* full snapshot — each new one retires the previous full card in place (a one-line tombstone marker stays where that turn's recall fired, its full tokens metered out of the pricing) and lands as a fresh card at its own turn, while the durable session log keeps every full snapshot for replay and audit. The naming matches llama-server's `--no-reasoning-preserve`: with it off, a turn's snapshot, like its reasoning, lives for that turn only. |
+| `recallAfterText` | `false` | `true`: a step past the first whose claim carries no human message recalls the bank anchored on the previous step's committed **text** - the words the agent wrote. Bounded by `autoContextTimeoutMs`, at most one recall per step; a human message in the claim takes the intervention path instead. |
+| `recallAfterReasoning` | `false` | Like `recallAfterText`, but anchored on the previous step's committed **reasoning**. With both keys on, the two anchors are combined into ONE recall (the reasoning first, then the text) - never two lookups. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `4096` | How much memory to bring back per recall. |
 | `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. Because the lookup runs ahead (below), most turns never pay this; a slow or stopped server never blocks the agent. |
@@ -100,9 +102,22 @@ recalls the bank on the spot (bounded by `autoContextTimeoutMs`),
 anchored on the intervention itself, so a mid-turn correction arrives
 with the memories about what it corrects. A step that only carries
 plugin-injected context recalls nothing.
+By default, that last sentence is the whole story: a step without a
+human message recalls nothing. Set `recallAfterText: true` and/or
+`recallAfterReasoning: true` to change it - at a step past the first
+whose claim carries no human message, the plugin recalls the bank
+anchored on the previous step's own output: the text it wrote and/or the
+reasoning it committed (with both on, one combined anchor, the reasoning
+first, then the text). The lookup is bounded by `autoContextTimeoutMs`
+like the intervention's and rides the same decision that advances the
+step, so memory about what the agent just did is in context before the
+next model call. A human message in the claim still wins the precedence
+(the intervention path above), and there is at most one recall per step.
 Each note's row shows how long its lookup took (for example
 `recall - 12ms`) in place of the plugin name — expand the row to see the
-producer.
+producer. A mid-step agent-output note is labeled by what it anchored on:
+`recall:text - 12ms` (the text), `recall:think - 12ms` (the reasoning),
+or `recall:think+text - 12ms` (the combined anchor).
 The query is not just that one message: with the default
 `recallContextTurns: 5`, the last few turns of the conversation ride
 along under a `Prior context:` block (one line per message, capped at
@@ -123,7 +138,9 @@ recall stays on the model's surface (the full history of cards remains
 in the session log for replay). The naming matches llama-server's
 `--no-reasoning-preserve`: with it off, a turn's snapshot, like its
 reasoning, lives for that turn only. The price is that a retired card
-restarts the model's cached prefix.
+restarts the model's cached prefix - a mid-step note retires on the same
+terms, and an unchanged recall commits nothing at all (no retirement, no
+prefix cost), so identical repeated steps stay free.
 
 ### Giving the plugin its key
 

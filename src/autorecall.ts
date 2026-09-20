@@ -11,9 +11,24 @@
  * bounded synchronous path anchored on the intervention itself: the loop
  * delivers steering at the next step boundary and skips the turn-stopping
  * prefetch while a steer is still queued, so that step owns no cache and
- * waits on the server at most `autoContextTimeoutMs`. A step claim without
- * a human message (plugin-injected context alone) is not an intent and
- * recalls nothing.
+ * waits on the server at most `autoContextTimeoutMs`.
+ *
+ * A step claim WITHOUT a human message (plugin-injected context alone) is
+ * not an intent and recalls nothing by default; the `recallAfterText` and
+ * `recallAfterReasoning` config keys (both default `false`) enable a
+ * MID-STEP agent-output recall for such a step: it anchors on the previous
+ * step's committed assistant message (its visible `text` and/or its
+ * `reasoning` blocks, each kind capped, one composed anchor, one lookup),
+ * runs the same bounded synchronous path, and commits the snapshot on that
+ * step's decision with a kind-tagged row label (`recall:text - <ms>ms`,
+ * `recall:think - <ms>ms`, `recall:think+text - <ms>ms`). A steering claim
+ * always wins the precedence: the intervention anchors before the mid-step
+ * anchor is consulted. The lookup targets the previous step by
+ * (turn, step - 1) in the durable log (the loop has committed it before
+ * the pre-step fires) and needs no state of its own. `recallPreserve:
+ * false` retires across all snapshot kinds, trigger-agnostic: a mid-step
+ * recall refreshes the latest card exactly like a turn recall does, and an
+ * unchanged mid-step recall commits nothing.
  *
  * Assembly runs BEFORE the pre-step waterfall, so the memory cannot ride
  * the system prompt for its own turn; the snapshot instead rides the
@@ -89,7 +104,8 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
-import { composeRecallQuery, findRetainedSnapshots, queryFromHumanMessages, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
+import { composeRecallQuery, findRetainedSnapshots, midStepAnchor, previousStepAssistant, queryFromHumanMessages, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
+import type { MidStepKind } from './snapshot.ts'
 import type { DirectiveRule, RecallHit } from './types.ts'
 
 /**
@@ -190,7 +206,10 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  *   later step's HUMAN intervention anchors its own bounded synchronous
  *   lookup (the loop skips the prefetch while a steer is queued, so the
  *   step owns no cache) and commits the snapshot onto that step's
- *   decision;
+ *   decision; a later step's claim WITHOUT a human message anchors the
+ *   mid-step agent-output recall on the previous step's committed
+ *   assistant message when `recallAfterText` / `recallAfterReasoning` is
+ *   on (kind-tagged row label), else passes through;
  * - `turnStopping` — starts the detached prefetch for the closing turn
  *   (only while `prefetch` is on);
  * - `disposed` — aborts and drops the session's slot.
@@ -309,11 +328,13 @@ export function buildAutoRecall(
     hits: RecallHit[],
     rules: DirectiveRule[],
     durationMs: number,
+    kind?: MidStepKind,
   ): PreStepDecision {
     if (decision.kind !== 'enter') return decision
     if (hits.length === 0 && rules.length === 0) return decision
     const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
     const retained = findRetainedSnapshots(session, pluginName)
+    const label = kind === undefined ? `recall - ${durationMs}ms` : `recall:${kind} - ${durationMs}ms`
 
     if (!config.recallPreserve) {
       const latest = retained[0]
@@ -324,7 +345,7 @@ export function buildAutoRecall(
       if (latest !== undefined && latest.text === text) return decision
       const snapshot = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label: `recall - ${durationMs}ms`, sections: [{ name: pluginName, text }] },
+        source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label, sections: [{ name: pluginName, text }] },
       })
       try {
         if (latest !== undefined) {
@@ -388,12 +409,45 @@ export function buildAutoRecall(
     const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, rules) : text
     const appended = createUserMessage({
       content: [{ type: 'text', text: committed }],
-      source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label: `recall - ${durationMs}ms`, sections: [{ name: pluginName, text: committed }] },
+      source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label, sections: [{ name: pluginName, text: committed }] },
     })
     return { kind: 'enter', messages: [...decision.messages, appended] }
   }
 
-  const preStep = async ({ agent, messages, step, signal }: PreStepPayload, next: () => Promise<PreStepDecision>): Promise<PreStepDecision> => {
+  /**
+   * The bounded synchronous recall + directive pair on `query`, shared by
+   * the turn / intervention / mid-step paths: one result or no result (a
+   * timeout, abort, or failure means the step proceeds without memory:
+   * `null`, and the base decision passes through untouched). Both lookups
+   * ride ONE bounded budget: the shared controller aborts the whole pair
+   * at `autoContextTimeoutMs` (sequential: the directives list is cheap,
+   * and the shared timeout still bounds the total), and the step's signal
+   * aborts the pair early when the turn dies mid-lookup.
+   */
+  function syncRecall(session: Session, query: string, signal: AbortSignal): Promise<PrefetchedTurn | null> {
+    return (async (): Promise<PrefetchedTurn | null> => {
+      const startedAt = Date.now()
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), config.autoContextTimeoutMs)
+      const onAbort = (): void => controller.abort()
+      if (!signal.aborted) signal.addEventListener('abort', onAbort, { once: true })
+      try {
+        const recallPromise = query.length > 0
+          ? mount.recall(query, controller.signal, session)
+          : Promise.resolve<RecallHit[]>([])
+        const hits = await recallPromise
+        const rules = await mount.listDirectives(controller.signal, session)
+        return { hits, rules, durationMs: Date.now() - startedAt }
+      } catch {
+        return null
+      } finally {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', onAbort)
+      }
+    })()
+  }
+
+  const preStep = async ({ agent, messages, turn, step, signal }: PreStepPayload, next: () => Promise<PreStepDecision>): Promise<PreStepDecision> => {
     const decision = await next()
     const session = agent.session
     if (decision.kind !== 'enter' || signal.aborted) {
@@ -411,10 +465,34 @@ export function buildAutoRecall(
     // boundary (an intervention): recall it on the bounded synchronous path
     // anchored on the intervention itself (the loop skips the
     // turn-stopping prefetch while a steer is queued, so the step owns no
-    // cache). A claim without a human message (plugin-injected context
-    // alone) is not an intent and recalls nothing.
+    // cache). A steering claim always wins the precedence over a mid-step
+    // agent-output anchor (below): a human message in the claim means the
+    // step is already anchored on the steer.
     const intervention = step > 1 ? queryFromHumanMessages(messages) : ''
-    if (step > 1 && intervention.length === 0) return decision
+    if (step > 1 && intervention.length === 0) {
+      // A claim without a human message (plugin-injected context alone) is
+      // not an intent and recalls nothing by default. The mid-step
+      // agent-output recall (recallAfterText / recallAfterReasoning, both
+      // default off) anchors it on the PREVIOUS step's committed assistant
+      // message instead: the loop has already committed that event to the
+      // durable log, so it is found by (turn, step - 1).
+      if (config.recallAfterText || config.recallAfterReasoning) {
+        const previous = previousStepAssistant(session, turn, step)
+        if (previous !== undefined) {
+          const anchored = midStepAnchor(previous.message, config.recallAfterText, config.recallAfterReasoning)
+          if (anchored !== null) {
+            // The anchor's turn is on the log (the current turn's human line
+            // stays in the context: the step recalls against the thing it is
+            // responding to), and the anchor's own line is dropped by seq (it
+            // is the query's tail, not its context).
+            const query = composeRecallQuery(session, anchored.anchor, config.recallContextTurns, true, previous.seq)
+            const result = await syncRecall(session, query, signal)
+            if (result !== null) return commitSnapshot(decision, session, result.hits, result.rules, result.durationMs, anchored.kind)
+          }
+        }
+      }
+      return decision
+    }
     // The previous turn's prefetch, if it is here: ready results are free,
     // in-flight ones get the same budget the synchronous path would have
     // spent, and a timeout means this turn proceeds without memory — the
@@ -442,36 +520,12 @@ export function buildAutoRecall(
     // compose as the context the steer refines.
     const latest = step > 1 ? intervention : queryFromMessages(messages)
     const query = composeRecallQuery(session, latest, config.recallContextTurns, false)
-    // Both lookups ride ONE bounded budget: the shared controller aborts the
-    // whole pair at autoContextTimeoutMs (sequential — the directives list
-    // is cheap, and the shared timeout still bounds the total).
-    let hits: RecallHit[] = []
-    let rules: DirectiveRule[] = []
-    // Wall clock for the row label: how long the bounded recall + directive
-    // pair took. Only committed on success — a timed-out or failed pair
-    // returns without a snapshot, so the label is real bank latency.
-    let durationMs = 0
-    try {
-      const startedAt = Date.now()
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), config.autoContextTimeoutMs)
-      const onAbort = (): void => controller.abort()
-      signal.addEventListener('abort', onAbort, { once: true })
-      try {
-        const recallPromise = query.length > 0
-          ? mount.recall(query, controller.signal, agent.session)
-          : Promise.resolve<RecallHit[]>([])
-        hits = await recallPromise
-        rules = await mount.listDirectives(controller.signal, agent.session)
-      } finally {
-        clearTimeout(timer)
-        signal.removeEventListener('abort', onAbort)
-      }
-      durationMs = Date.now() - startedAt
-    } catch {
-      return decision
-    }
-    return commitSnapshot(decision, session, hits, rules, durationMs)
+    // The bounded synchronous path (shared with the mid-step branch above):
+    // a timed-out, aborted, or failed pair returns without a snapshot, so a
+    // committed label is always real bank latency.
+    const result = await syncRecall(session, query, signal)
+    if (result === null) return decision
+    return commitSnapshot(decision, session, result.hits, result.rules, result.durationMs)
   }
 
   const turnStopping = ({ agent, signal }: TurnStoppingPayload): void => {

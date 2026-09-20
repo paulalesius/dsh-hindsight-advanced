@@ -37,6 +37,21 @@ export interface ResolvedConfig {
    *  replies between them), the whole thing capped at the query bound with
    *  the anchor kept whole and the oldest context dropping first. */
   recallContextTurns: number
+  /** `true`: a LATER step of a running turn (a step claim without a human
+   *  message) recalls when the previous step's committed assistant message
+   *  carries visible `text` blocks: the step takes the bounded synchronous
+   *  path anchored on that text, and its row is labeled `recall:text -
+   *  <ms>ms`. Default `false`: a non-human step claim recalls nothing (the
+   *  pre-step stays intervention-only). */
+  recallAfterText: boolean
+  /** `true`: the same mid-step recall, anchored on the previous step's
+   *  `reasoning` blocks (its thinking) instead of its visible text (row
+   *  label `recall:think - <ms>ms`). Default `false`. With BOTH keys on, a
+   *  step that carries both kinds gets ONE recall on one composed anchor
+   *  (row label `recall:think+text - <ms>ms`): never two lookups. A
+   *  steering claim always wins the precedence over either anchor (the
+   *  intervention path). */
+  recallAfterReasoning: boolean
   /** `true` (default): the model surface is append-only for the snapshots —
    *  every committed recall stays in the model context. `false`: the
    *  surface carries only the LATEST snapshot — each new one replaces the
@@ -221,6 +236,8 @@ export const Config: {
         autoContext: boolFlag(record, 'autoContext', true, issues),
         prefetch: boolFlag(record, 'prefetch', true, issues),
         recallContextTurns: intFlag(record, 'recallContextTurns', DEFAULT_RECALL_CONTEXT_TURNS, issues),
+        recallAfterText: boolFlag(record, 'recallAfterText', false, issues),
+        recallAfterReasoning: boolFlag(record, 'recallAfterReasoning', false, issues),
         recallPreserve: boolFlag(record, 'recallPreserve', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),

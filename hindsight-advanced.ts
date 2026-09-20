@@ -71,6 +71,18 @@
  *   budget). Subagent sessions are skipped, so a slow or stopped Hindsight
  *   server never blocks a turn.
  *
+ *   A HUMAN intervention claimed at a later step of a running turn
+ *   (steering delivered while the agent is mid-turn) is recalled on the
+ *   same bounded synchronous path, anchored on the steer itself. A step
+ *   claim WITHOUT a human message recalls nothing by default; the
+ *   `recallAfterText` / `recallAfterReasoning` keys (both default off)
+ *   enable the mid-step agent-output recall for such a step: it anchors on
+ *   the previous step's committed assistant message (its visible `text`
+ *   and/or its `reasoning` blocks, one composed anchor, one lookup) and
+ *   its row is labeled with the trigger kind (`recall:text - <ms>ms`,
+ *   `recall:think - <ms>ms`, `recall:think+text - <ms>ms`). A steering
+ *   claim always wins the precedence over either anchor.
+ *
   *   The snapshot is append-only by default (`recallPreserve: true`): the
  *   plugin never replaces or erases a previous turn's snapshot, so the
  *   model context accumulates one snapshot per distinct turn, while the
@@ -140,6 +152,19 @@
  *   line per message, capped at 1000 chars with the OLDEST lines
  *   dropping first (the anchor stays whole). `1` restores the
  *   single-message query.
+ * - `recallAfterText`: default `false`. When on, a LATER step of a running
+ *   turn whose claim carries no human message recalls on the bounded
+ *   synchronous path anchored on the previous step's committed assistant
+ *   message's visible `text` blocks (the collapsed row is labeled
+ *   `recall:text - <ms>ms`); the step passes through when the previous
+ *   step carries no text.
+ * - `recallAfterReasoning`: default `false`. The same mid-step recall,
+ *   anchored on the previous step's `reasoning` blocks instead (row label
+ *   `recall:think - <ms>ms`). With both keys on, a step that carries both
+ *   kinds gets ONE recall on one composed anchor (the reasoning first,
+ *   then the text; row label `recall:think+text - <ms>ms`), never two
+ *   lookups. A steering claim always wins the precedence over either
+ *   anchor.
  * - `recallPreserve` — default `true`: the model surface is append-only
  *   for the snapshots — every committed recall stays in the model context.
  *   `false`: the surface carries only the LATEST full snapshot — each new

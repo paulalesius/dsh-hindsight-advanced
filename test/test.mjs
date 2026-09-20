@@ -67,6 +67,8 @@ assert.deepEqual(standard.value, {
   autoContext: true,
   prefetch: true,
   recallContextTurns: 5,
+  recallAfterText: false,
+  recallAfterReasoning: false,
   recallPreserve: true,
   retainAsync: false,
   maxRecallTokens: 4096,
@@ -113,6 +115,20 @@ assert.ok('value' in noPreserve, JSON.stringify(noPreserve))
 assert.equal(noPreserve.value.recallPreserve, false)
 const badPreserve = validate({ bank: 'x', recallPreserve: 'yes' })
 assert.ok('issues' in badPreserve && badPreserve.issues.some(issue => issue.path?.[0] === 'recallPreserve'), JSON.stringify(badPreserve))
+
+// recallAfterText / recallAfterReasoning: off by default (the mid-step
+// agent-output recall is opt-in); opt-in + validation
+const midText = validate({ bank: 'x', recallAfterText: true })
+assert.ok('value' in midText, JSON.stringify(midText))
+assert.equal(midText.value.recallAfterText, true)
+assert.equal(midText.value.recallAfterReasoning, false)
+const midThink = validate({ bank: 'x', recallAfterReasoning: true })
+assert.ok('value' in midThink, JSON.stringify(midThink))
+assert.equal(midThink.value.recallAfterReasoning, true)
+const badMidText = validate({ bank: 'x', recallAfterText: 'yes' })
+assert.ok('issues' in badMidText && badMidText.issues.some(issue => issue.path?.[0] === 'recallAfterText'), JSON.stringify(badMidText))
+const badMidThink = validate({ bank: 'x', recallAfterReasoning: 'yes' })
+assert.ok('issues' in badMidThink && badMidThink.issues.some(issue => issue.path?.[0] === 'recallAfterReasoning'), JSON.stringify(badMidThink))
 
 // bank is required
 const none = validate({})
@@ -242,6 +258,36 @@ async function runStep(listener, a, step, messages) {
   }
   return decision
 }
+
+// Run a mid-turn step on a FIXED turn the way the loop does: `runStep`
+// numbers every call as a new turn, while the mid-step recalls live INSIDE
+// one turn (step 2 of turn 1). The decision's messages are appended with a
+// plain append, as the loop does.
+async function runStepAt(listener, a, turn, step, messages) {
+  a.turn = turn
+  const decision = await listener(
+    { agent: a, messages, turn, step, signal: baseSignal },
+    async () => ({ kind: 'enter', messages }),
+  )
+  if (decision.kind === 'enter') {
+    for (const message of decision.messages) a.session.append('user/message', message, { surfaceOp: 'append' })
+  }
+  return decision
+}
+
+// Seed the durable log with a step's committed assistant message the way
+// the loop's `assistant/message` event carries it (the mid-step recall's
+// anchor source): `turn`/`step` on the event data, the committed blocks on
+// `message.content`.
+const asstStep = (session, turn, step, blocks) =>
+  session.append('assistant/message', {
+    turn,
+    step,
+    message: { id: `a-${turn}-${step}`, role: 'assistant', content: blocks, source: { kind: 'model' } },
+  })
+const textBlock = (text) => ({ type: 'text', text })
+const thinkBlock = (text) => ({ type: 'reasoning', text })
+const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, input: {} })
 
 // ── authorization: literal key, credential ref (seam), ref (env fallback) ───
 {
@@ -1250,6 +1296,223 @@ async function runStep(listener, a, step, messages) {
   assert.equal(flaky.events.filter(event => event.type === 'compaction/prune').length, 1, 'the orphaned price stays in the log (harmless)')
   assert.equal(flaky.surface.nodes.length, 4, 'old card, message, fresh card, message')
   console.log('ok  mount K: a refused retirement degrades to the append path (turn never breaks, orphaned price harmless)')
+}
+
+// ── mount L: mid-step agent-output recall (recallAfterText / recallAfterReasoning) ──
+{
+  // L-main: recallAfterText on. A LATER step whose claim carries no human
+  // message recalls, anchored on the previous step's committed TEXT blocks:
+  // the row is labeled recall:text, the anchor's own line is dropped from
+  // the context, the current turn's human line stays.
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'midstep', prefetch: false, recallAfterText: true })
+  const listener = ctx.listeners[0].fn
+  const tool = ctx.tools.registered[0]
+  const lynn = { session: makeSession('sess-l1') }
+  const midstepRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/midstep/memories/recall')
+  await tool.execute({ action: 'retain', text: 'The lint config forbids var declarations.' }, { signal: baseSignal })
+
+  const d1 = await runStepAt(listener, lynn, 1, 1, [userMsg('check the lint config')])
+  assert.equal(d1.kind, 'enter')
+  assert.equal(d1.messages.length, 2, 'turn 1 (step 1) recalls synchronously; the snapshot rides the decision')
+  assert.equal(snapshots(lynn.session).length, 1)
+  assert.match(snapshots(lynn.session)[0].data.source.label, /^recall - \d+ms$/, 'the turn-1 row keeps the plain label')
+
+  // Step 1 commits thinking, visible text, and a tool call.
+  asstStep(lynn.session, 1, 1, [
+    thinkBlock('I should check the var declarations across the repo files.'),
+    textBlock('Reading the lint config to check for var declarations.'),
+    toolCallBlock('read'),
+  ])
+
+  // Step 2, empty claim: the mid-step recall anchors on the step-1 TEXT.
+  const d2 = await runStepAt(listener, lynn, 1, 2, [])
+  assert.equal(d2.kind, 'enter')
+  assert.equal(d2.messages.length, 1, 'the claim was empty; only the mid-step snapshot rides the decision')
+  const snaps2 = snapshots(lynn.session)
+  assert.equal(snaps2.length, 2)
+  assert.match(snaps2[1].data.source.label, /^recall:text - \d+ms$/, 'the mid-step row is labeled by the anchor kind')
+  assert.equal(snaps2[1].data.source.plugin, 'hindsight-advanced', 'the plugin stays the attribution identity')
+  assert.equal(midstepRecalls().length, 2, 'exactly one new recall for the mid-step')
+  assert.equal(
+    midstepRecalls().at(-1).body.query,
+    'Prior context:\n\nuser: check the lint config\n\nReading the lint config to check for var declarations.',
+    'the anchor is the query tail: its own line is dropped, the turn human line kept',
+  )
+
+  // Step 2 commits reasoning only: no enabled kind present, no anchor, the
+  // step passes through.
+  asstStep(lynn.session, 1, 2, [thinkBlock('Only reasoning, nothing visible yet.'), toolCallBlock('read')])
+  const d3 = await runStepAt(listener, lynn, 1, 3, [])
+  assert.equal(d3.messages.length, 0, 'no anchor kind present: the step passes through')
+  assert.equal(snapshots(lynn.session).length, 2, 'no snapshot committed')
+  assert.equal(midstepRecalls().length, 2, 'no bank call')
+
+  // Step 4, a human steer: the intervention wins the precedence over the
+  // mid-step anchor (the synchronous path, anchored on the steer itself).
+  const d4 = await runStepAt(listener, lynn, 1, 4, [userMsg('stop, the lint check must cover the docs folder too')])
+  assert.equal(d4.messages.length, 2, 'the steer claim plus the intervention snapshot ride the decision')
+  const snaps4 = snapshots(lynn.session)
+  assert.equal(snaps4.length, 3)
+  assert.match(snaps4[2].data.source.label, /^recall - \d+ms$/, 'the intervention row keeps the plain label')
+  assert.equal(
+    midstepRecalls().at(-1).body.query,
+    'Prior context:\n\nuser: check the lint config\nassistant: Reading the lint config to check for var declarations.\n\nstop, the lint check must cover the docs folder too',
+    'the intervention anchors on the steer itself; its anchor line is NOT dropped (the synchronous path)',
+  )
+  console.log("ok  mount L: a no-human mid-step recalls the previous step's text (label recall:text, anchor line dropped, the steer wins the precedence)")
+
+  // L2: recallAfterReasoning on: the anchor is the previous step's
+  // REASONING (a reasoning-only assistant message contributes no context
+  // line, so the context is the human line alone).
+  const ctx2 = makeCtx()
+  plugin.apply(ctx2, { ...standard.value, baseUrl: stubUrl, bank: 'midstep2', prefetch: false, recallAfterReasoning: true })
+  const listener2 = ctx2.listeners[0].fn
+  const tool2 = ctx2.tools.registered[0]
+  const marge = { session: makeSession('sess-l2') }
+  const midstep2Recalls = () => state.requests.filter(request => request.path === '/v1/default/banks/midstep2/memories/recall')
+  await tool2.execute({ action: 'retain', text: 'The CI cache is keyed on the commit hash and the lockfile.' }, { signal: baseSignal })
+
+  const e1 = await runStepAt(listener2, marge, 1, 1, [userMsg('why does CI rebuild the cache')])
+  assert.equal(e1.messages.length, 2, 'the turn-1 recall lands')
+
+  asstStep(marge.session, 1, 1, [
+    thinkBlock('The CI cache key is the commit hash plus the lockfile, so a new commit rebuilds it.'),
+    toolCallBlock('read'),
+  ])
+
+  const e2 = await runStepAt(listener2, marge, 1, 2, [])
+  assert.equal(e2.messages.length, 1)
+  const snapsE = snapshots(marge.session)
+  assert.equal(snapsE.length, 2)
+  assert.match(snapsE[1].data.source.label, /^recall:think - \d+ms$/, 'the reasoning anchor is labeled recall:think')
+  assert.equal(
+    midstep2Recalls().at(-1).body.query,
+    'Prior context:\n\nuser: why does CI rebuild the cache\n\nThe CI cache key is the commit hash plus the lockfile, so a new commit rebuilds it.',
+    'the reasoning is the query tail; the reasoning-only assistant message adds no context line',
+  )
+  console.log('ok  mount L: recallAfterReasoning anchors the mid-step recall on the reasoning (label recall:think)')
+
+  // L3: both keys on: ONE composed anchor (the reasoning first, then the
+  // text), ONE recall, labeled recall:think+text; subagent sessions stay
+  // silent at every step.
+  const ctx3 = makeCtx()
+  plugin.apply(ctx3, { ...standard.value, baseUrl: stubUrl, bank: 'midstep3', prefetch: false, recallAfterText: true, recallAfterReasoning: true })
+  const listener3 = ctx3.listeners[0].fn
+  const tool3 = ctx3.tools.registered[0]
+  const nora = { session: makeSession('sess-l3') }
+  const midstep3Recalls = () => state.requests.filter(request => request.path === '/v1/default/banks/midstep3/memories/recall')
+  await tool3.execute({ action: 'retain', text: 'The build flags for release are set in the Makefile targets.' }, { signal: baseSignal })
+
+  const f1 = await runStepAt(listener3, nora, 1, 1, [userMsg('check the release build flags')])
+  assert.equal(f1.messages.length, 2, 'the turn-1 recall lands')
+
+  asstStep(nora.session, 1, 1, [
+    thinkBlock('The release flags live in the Makefile release targets; I need to read the Makefile.'),
+    textBlock('Reading the Makefile to check the release build flags.'),
+    toolCallBlock('read'),
+  ])
+
+  const f2 = await runStepAt(listener3, nora, 1, 2, [])
+  assert.equal(f2.messages.length, 1)
+  const snapsF = snapshots(nora.session)
+  assert.equal(snapsF.length, 2)
+  assert.match(snapsF[1].data.source.label, /^recall:think\+text - \d+ms$/, 'both kinds compose one anchor, labeled recall:think+text')
+  assert.equal(midstep3Recalls().length, 2, 'ONE recall for the composed anchor, never two lookups')
+  assert.equal(
+    midstep3Recalls().at(-1).body.query,
+    'Prior context:\n\nuser: check the release build flags\n\nThe release flags live in the Makefile release targets; I need to read the Makefile.\nReading the Makefile to check the release build flags.',
+    'reasoning first, then text, as the composed anchor tail',
+  )
+
+  // A subagent session inherits the mount but stays silent at every step.
+  const sub = { session: makeSession('sess-l3s', { origin: 'subagent' }) }
+  const s1 = await runStepAt(listener3, sub, 1, 1, [userMsg('subagent task: check the release build flags')])
+  assert.equal(s1.messages.length, 1, 'the subagent step-1 passes through (no snapshot)')
+  asstStep(sub.session, 1, 1, [textBlock('Reading the Makefile to check the release build flags.')])
+  const s2 = await runStepAt(listener3, sub, 1, 2, [])
+  assert.equal(s2.messages.length, 0, 'the subagent mid-step passes through too')
+  assert.equal(snapshots(sub.session).length, 0)
+  assert.equal(midstep3Recalls().length, 2, 'no subagent bank call')
+  console.log('ok  mount L: both keys compose ONE think+text anchor (one recall, label recall:think+text); subagent steps stay silent')
+
+  // L4: the keys are OFF by default: a no-human mid-step is untouched.
+  const ctx4 = makeCtx()
+  plugin.apply(ctx4, { ...standard.value, baseUrl: stubUrl, bank: 'midstepoff', prefetch: false })
+  const listener4 = ctx4.listeners[0].fn
+  const tool4 = ctx4.tools.registered[0]
+  const ola = { session: makeSession('sess-l4') }
+  const offRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/midstepoff/memories/recall')
+  await tool4.execute({ action: 'retain', text: 'The lint config forbids var declarations.' }, { signal: baseSignal })
+
+  const g1 = await runStepAt(listener4, ola, 1, 1, [userMsg('check the lint config')])
+  assert.equal(g1.messages.length, 2, 'the turn-1 recall still lands')
+  asstStep(ola.session, 1, 1, [textBlock('Reading the lint config to check for var declarations.')])
+  const g2 = await runStepAt(listener4, ola, 1, 2, [])
+  assert.equal(g2.messages.length, 0, 'the default-off mid-step passes through (the claim was empty)')
+  assert.equal(snapshots(ola.session).length, 1, 'no mid-step snapshot')
+  assert.equal(offRecalls().length, 1, 'no mid-step bank call')
+  console.log('ok  mount L: default-off keys leave a no-human mid-step untouched (pass-through, no bank call)')
+
+  // L5: recallPreserve false + recallAfterText: the mid-step snapshot
+  // retires the previous full card in place (tombstone + shadow price); an
+  // unchanged mid-step recall is a pure no-op.
+  const ctx5 = makeCtx({ tokenMeter: { estimateMessage: () => 7 } })
+  plugin.apply(ctx5, { ...standard.value, baseUrl: stubUrl, bank: 'midstep4', prefetch: false, recallPreserve: false, recallAfterText: true, recallContextTurns: 1 })
+  const listener5 = ctx5.listeners[0].fn
+  const tool5 = ctx5.tools.registered[0]
+  const pete = { session: makeSession('sess-l5') }
+  const midstep4Recalls = () => state.requests.filter(request => request.path === '/v1/default/banks/midstep4/memories/recall')
+  await tool5.execute({ action: 'retain', text: 'The build flags for release are set in the Makefile targets.' }, { signal: baseSignal })
+  await tool5.execute({ action: 'retain', text: 'The linter runs before every merge commit.' }, { signal: baseSignal })
+
+  const h1 = await runStepAt(listener5, pete, 1, 1, [userMsg('check the release build flags')])
+  assert.equal(h1.messages.length, 1, 'the first snapshot commits directly, never riding the decision')
+  const snapsH1 = snapshots(pete.session)
+  assert.equal(snapsH1.length, 1)
+  assert.equal(pete.session.surface.nodes[0], snapsH1[0].seq, 'the snapshot lands before the triggering message')
+
+  asstStep(pete.session, 1, 1, [textBlock('Running the linter before the merge commit.')])
+
+  const h2 = await runStepAt(listener5, pete, 1, 2, [])
+  assert.equal(h2.messages.length, 1, 'the claim was empty; the full mid-step card rides the decision')
+  const snapsH2 = snapshots(pete.session)
+  assert.equal(snapsH2.length, 2, 'the durable log keeps both full snapshots')
+  const oldCard = snapsH2[0]
+  const newCard = snapsH2[1]
+  assert.match(newCard.data.source.label, /^recall:text - \d+ms$/, 'the mid-step card is labeled by the anchor kind')
+  assert.ok(!onSurface(pete.session, oldCard), 'the old full card is retired from the surface')
+  assert.ok(onSurface(pete.session, newCard), 'the fresh full card is on the surface')
+  assert.equal(pete.session.surface.nodes[pete.session.surface.nodes.length - 1], newCard.seq, 'the fresh card lands after the triggering message')
+  const tombs = pete.session.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin' && event.data.source.form === 'notice')
+  assert.equal(tombs.length, 1, 'one tombstone for one retirement')
+  const tomb = tombs[0]
+  assert.deepEqual(tomb.surfaceOp, { op: 'replace', startSeq: oldCard.seq, endSeq: oldCard.seq }, 'the tombstone takes the old card\'s slot')
+  assert.deepEqual(tomb.sourceEventSeqs, [oldCard.seq], 'the replace cites the shadowed node')
+  assert.ok(onSurface(pete.session, tomb))
+  const prunes = pete.session.events.filter(event => event.type === 'compaction/prune')
+  assert.equal(prunes.length, 1, 'one shadow price for one retirement')
+  assert.deepEqual(prunes[0].data, {
+    shadowedRange: { start: oldCard.seq, end: oldCard.seq },
+    shadowedSeqs: [oldCard.seq],
+    shadowedTokenCount: 7,
+  })
+  assert.equal(pete.session.events.indexOf(prunes[0]), pete.session.events.indexOf(tomb) - 1, 'the price is appended immediately before the tombstone')
+  assert.equal(
+    midstep4Recalls().at(-1).body.query,
+    'Running the linter before the merge commit.',
+    'recallContextTurns 1: the mid-step anchor alone is the query',
+  )
+
+  // Step 3, an identical anchor: the unchanged recall is a pure no-op.
+  asstStep(pete.session, 1, 2, [textBlock('Running the linter before the merge commit.')])
+  const h3 = await runStepAt(listener5, pete, 1, 3, [])
+  assert.equal(h3.messages.length, 0, 'an unchanged mid-step recall commits nothing')
+  assert.equal(snapshots(pete.session).length, 2, 'still both full snapshots in the durable log')
+  assert.equal(pete.session.events.filter(event => event.data.source?.kind === 'plugin' && event.data.source.form === 'notice').length, 1, 'no second tombstone')
+  assert.equal(pete.session.events.filter(event => event.type === 'compaction/prune').length, 1, 'no second price')
+  assert.equal(midstep4Recalls().length, 3, 'the lookup still ran (deterministic stub); nothing was committed')
+  console.log('ok  mount L: recallPreserve false retires the previous card for a mid-step snapshot (tombstone, shadow price); unchanged = no-op')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

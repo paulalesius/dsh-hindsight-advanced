@@ -1,13 +1,15 @@
 /**
  * The automatic-recall surface logic: derive the recall query from the
- * step's messages, render hits as the model-facing memory text, render
- * the marker for an unchanged recall (the applied memories, one compact
- * line each), render the tombstone a `recallPreserve: false` surface
- * installs in place of a retired snapshot card (a one-line `notice`-form
- * marker; the full card of the current recall is the one appended at its
- * own turn), and find this mount's full snapshots still on the model-
- * visible surface (an unchanged recall commits the marker instead of a
- * duplicate block; tombstones are never snapshots).
+ * step's messages (the turn's anchor, an intervention step's human steer,
+ * or the previous step's committed assistant message for a mid-step
+ * agent-output recall), render hits as the model-facing memory text,
+ * render the marker for an unchanged recall (the applied memories, one
+ * compact line each), render the tombstone a `recallPreserve: false`
+ * surface installs in place of a retired snapshot card (a one-line
+ * `notice`-form marker; the full card of the current recall is the one
+ * appended at its own turn), and find this mount's full snapshots still
+ * on the model-visible surface (an unchanged recall commits the marker
+ * instead of a duplicate block; tombstones are never snapshots).
  *
  * @module dsh-plugin-hindsight-advanced/snapshot
  */
@@ -143,6 +145,98 @@ export function queryFromHumanMessages(messages: readonly UserMessage[]): string
   return ''
 }
 
+/** Cap for the mid-step recall anchor's visible text (the joined `text`
+ *  blocks of the previous step's committed assistant message, before the
+ *  final {@link MAX_QUERY_CHARS} query cap). */
+export const MID_STEP_TEXT_CHARS = 600
+
+/** Cap for the mid-step recall anchor's reasoning (the joined `reasoning`
+ *  blocks of the previous step's committed assistant message, before the
+ *  final {@link MAX_QUERY_CHARS} query cap). */
+export const MID_STEP_REASONING_CHARS = 400
+
+/** The block kind(s) a mid-step recall was anchored on: the tag for the
+ *  collapsed row's label (`recall:text - <ms>ms`, `recall:think - <ms>ms`,
+ *  `recall:think+text - <ms>ms`). */
+export type MidStepKind = 'text' | 'think' | 'think+text'
+
+/** One mid-step recall's anchor, derived from the previous step's
+ *  committed assistant message. */
+export interface MidStepAnchor {
+  /** The composed anchor: the enabled kinds joined in the model's
+   *  generation order (the reasoning first, then the text), each kind's
+   *  blocks joined with a space and capped at its bound. */
+  anchor: string
+  /** Which kind(s) the anchor is made of (the row's label tag). */
+  kind: MidStepKind
+}
+
+/**
+ * The mid-step recall anchor from a step's committed assistant message:
+ * the enabled block kinds (gated by `recallAfterText` /
+ * `recallAfterReasoning`), reasoning first and then text (the model's
+ * generation order), each kind's non-empty blocks joined with a space and
+ * capped at its bound, the two kinds joined with a newline. `null` when
+ * neither enabled kind is present in the message (or the message carries
+ * no block array at all, as an interrupted prefix may): the step anchors
+ * nothing and the pre-step passes through.
+ */
+export function midStepAnchor(
+  message: AssistantMessage,
+  recallAfterText: boolean,
+  recallAfterReasoning: boolean,
+): MidStepAnchor | null {
+  if (!recallAfterText && !recallAfterReasoning) return null
+  if (!Array.isArray(message.content)) return null
+  const text = recallAfterText
+    ? message.content
+        .filter(block => block.type === 'text')
+        .map(block => block.text.trim())
+        .filter(part => part.length > 0)
+        .join(' ')
+        .slice(0, MID_STEP_TEXT_CHARS)
+    : ''
+  const reasoning = recallAfterReasoning
+    ? message.content
+        .filter(block => block.type === 'reasoning')
+        .map(block => block.text.trim())
+        .filter(part => part.length > 0)
+        .join(' ')
+        .slice(0, MID_STEP_REASONING_CHARS)
+    : ''
+  const parts = [reasoning, text].filter(part => part.length > 0)
+  const anchor = parts.join('\n').trim()
+  if (anchor.length === 0) return null
+  const kind: MidStepKind = parts.length === 2 ? 'think+text' : reasoning.length > 0 ? 'think' : 'text'
+  return { anchor, kind }
+}
+
+/**
+ * The previous step's committed assistant message from `session`'s
+ * durable log (the `assistant/message` event for `turn`, `step - 1`): the
+ * message plus the event's seq (the caller drops that line from the
+ * query's context), or `undefined` when the log carries no such event (the
+ * loop has not committed the previous step yet: the mid-step recall
+ * degrades to a pass-through). `assistant/attempt` rows are log-only
+ * records of attempts that committed nothing and never anchor. By the
+ * time the pre-step for `step` fires, the loop has already appended
+ * `step - 1`'s event to the durable log, so the lookup finds it.
+ */
+export function previousStepAssistant(
+  session: Session,
+  turn: number,
+  step: number,
+): { message: AssistantMessage; seq: SessionSeq } | undefined {
+  const events = session.snapshotEvents()
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined || event.type !== 'assistant/message') continue
+    if (event.data.turn !== turn || event.data.step !== step - 1) continue
+    return { message: event.data.message, seq: event.seq }
+  }
+  return undefined
+}
+
 /** The last HUMAN message on `session`'s durable log, as a recall query —
  *  the turn-stopping prefetch needs it because that event carries no
  *  messages. Scans the log from the end (the tail is never shadowed by
@@ -187,10 +281,12 @@ function queryLine(message: UserMessage | AssistantMessage): string {
  * this plugin's own snapshots, are not turns) and runs to the next one.
  * `dropLastHuman` omits the log's last human message's own line — the
  * prefetch's anchor, which is the query's tail, not its context (its
- * assistant replies, which come after it, stay).
+ * assistant replies, which come after it, stay). `dropSeq` additionally
+ * omits one named event's line: the mid-step anchor's own line (the
+ * anchor is the query's tail, not its context).
  */
-function contextLines(session: Session, turns: number, dropLastHuman: boolean): string[] {
-  const entries: { role: 'user' | 'assistant'; line: string }[] = []
+function contextLines(session: Session, turns: number, dropLastHuman: boolean, dropSeq?: SessionSeq): string[] {
+  const entries: { seq: SessionSeq; role: 'user' | 'assistant'; line: string }[] = []
   let lastHumanAt = -1
   const events = session.snapshotEvents()
   for (let index = 0; index < events.length; index += 1) {
@@ -201,11 +297,11 @@ function contextLines(session: Session, turns: number, dropLastHuman: boolean): 
       const line = queryLine(event.data)
       if (line.length === 0) continue
       lastHumanAt = entries.length
-      entries.push({ role: 'user', line })
+      entries.push({ seq: event.seq, role: 'user', line })
     } else if (event.type === 'assistant/message') {
       const line = queryLine(event.data.message)
       if (line.length === 0) continue
-      entries.push({ role: 'assistant', line })
+      entries.push({ seq: event.seq, role: 'assistant', line })
     }
   }
   if (turns <= 0) return []
@@ -227,6 +323,7 @@ function contextLines(session: Session, turns: number, dropLastHuman: boolean): 
     const entry = entries[index]
     if (entry === undefined) continue
     if (dropLastHuman && index === lastHumanAt) continue
+    if (dropSeq !== undefined && entry.seq === dropSeq) continue
     lines.push(`${entry.role}: ${entry.line}`)
   }
   return lines
@@ -250,17 +347,30 @@ function contextLines(session: Session, turns: number, dropLastHuman: boolean): 
  * the anchor, its assistant replies become context lines); the
  * synchronous anchor comes from the pre-step payload, which is not on the
  * log yet (the log holds the prior turns only, so it counts `turns - 1`).
+ * A mid-step anchor (the previous step's committed assistant message) is
+ * on the log too: the current turn's human line stays in the window (the
+ * step recalls against the thing it is responding to) and the anchor's
+ * own line is dropped by name instead (its seq as `dropSeq`).
+ *
+ * `dropSeq`: optionally omit one named event's line from the context:
+ * the mid-step anchor's own line, which is the query's tail, not its
+ * context.
  */
 export function composeRecallQuery(
   session: Session,
   latest: string,
   turns: number,
   anchorIsOnLog: boolean,
+  dropSeq?: SessionSeq,
 ): string {
   const anchor = latest.trim()
   if (anchor.length === 0) return ''
   if (turns <= 1) return anchor.slice(0, MAX_QUERY_CHARS)
-  const lines = contextLines(session, turns - (anchorIsOnLog ? 0 : 1), anchorIsOnLog)
+  // The prefetch is the only caller that drops the last HUMAN line as the
+  // anchor; the mid-step path keeps it (the anchor's line is an assistant
+  // line, dropped by seq).
+  const dropLastHuman = anchorIsOnLog && dropSeq === undefined
+  const lines = contextLines(session, turns - (anchorIsOnLog ? 0 : 1), dropLastHuman, dropSeq)
   if (lines.length === 0) return anchor.slice(0, MAX_QUERY_CHARS)
   const header = 'Prior context:\n\n'
   const tail = `\n\n${anchor}`

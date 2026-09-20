@@ -55,6 +55,21 @@
         # ship.
         recallContextTurns: 5
 
+        # false - off. true - a LATER step of a running turn whose claim
+        # carries no human message recalls, anchored on the previous step's
+        # committed assistant message's visible TEXT blocks (the collapsed
+        # row is labeled `recall:text - <ms>ms`); the step passes through
+        # when the previous step has no text.
+        # recallAfterText: false
+
+        # false - off. true - the same mid-step recall, anchored on the
+        # previous step's REASONING blocks instead (row label
+        # `recall:think - <ms>ms`). Both keys on: a step carrying both
+        # kinds gets ONE recall on one composed anchor (reasoning first,
+        # then text; row label `recall:think+text - <ms>ms`), never two
+        # lookups. A steering claim always wins the precedence.
+        # recallAfterReasoning: false
+
         # true — the model surface is append-only: every committed recall
         # snapshot stays in the model context. false — the surface carries
         # only the LATEST full snapshot: each new one retires the
