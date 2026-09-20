@@ -165,6 +165,25 @@
  *   then the text; row label `recall:think+text - <ms>ms`), never two
  *   lookups. A steering claim always wins the precedence over either
  *   anchor.
+ * - `actionLessons`: default `false`. The failure-lesson pass for a
+ *   LATER step of a running turn whose claim carries no human message:
+ *   the previous step's committed assistant message's TOOL-CALL blocks
+ *   (one line per call - `bash: <command>` for bash, `name key=value`
+ *   for scalar args; capped at 500 chars) anchor a bounded recall
+ *   restricted to the bank's `experience`-type memories (the failure
+ *   lessons). A match commits a `form: 'notice'` row directly (never
+ *   riding the pre-step decision, so the snapshot/unchanged machinery
+ *   never sees it), labeled `lesson:<tool> - <ms>ms`, listing up to
+ *   `actionLessonCandidates` lesson lines (240 chars each, with the
+ *   match score and the memory's id). Lessons already shown this turn
+ *   are de-duplicated by memory id (the lookup still runs; a repeated
+ *   match commits nothing; the set resets with the turn). A previous
+ *   step without tool calls anchors nothing (no bank call). Gated by
+ *   `autoContext` like every automatic pass; subagent sessions stay
+ *   silent.
+ * - `actionLessonCandidates`: default `10`: the cap on the lesson lines
+ *   the `actionLessons` notice row renders (the recall itself is
+ *   unbounded by this key; the row keeps the first matches).
  * - `recallPreserve` — default `true`: the model surface is append-only
  *   for the snapshots — every committed recall stays in the model context.
  *   `false`: the surface carries only the LATEST full snapshot — each new

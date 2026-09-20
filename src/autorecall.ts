@@ -104,9 +104,9 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
-import { composeRecallQuery, findRetainedSnapshots, midStepAnchor, previousStepAssistant, queryFromHumanMessages, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
+import { composeRecallQuery, findRetainedSnapshots, lessonAnchor, midStepAnchor, previousStepAssistant, queryFromHumanMessages, queryFromMessages, queryFromSession, renderLesson, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
 import type { MidStepKind } from './snapshot.ts'
-import type { DirectiveRule, RecallHit } from './types.ts'
+import type { DirectiveRule, LessonHit, RecallHit } from './types.ts'
 
 /**
  * The `recallPreserve: false` path prices its surface `replace` through the
@@ -227,6 +227,11 @@ export function buildAutoRecall(
 ): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; disposed: (payload: DisposedPayload) => void } {
   const config = mount.config
   const slots = new Map<string, Slot>()
+  // The lesson rows already surfaced, per session and turn: a memory id is
+  // recorded when it first commits a row, and a second step of the same turn
+  // that matches the same id commits nothing (the entry resets when the
+  // turn changes). Deleted with the session.
+  const lessonSeen = new Map<string, { turn: number; ids: Set<string> }>()
 
   /**
    * The shadow-price (heuristic tokens) for the snapshot a `replace` retires,
@@ -447,6 +452,76 @@ export function buildAutoRecall(
     })()
   }
 
+  /**
+   * Per-turn lesson de-duplication: `true` when the memory id already had a
+   * lesson row committed in the current turn. The entry is created (or reset)
+   * on the first call of a turn, so an id recorded this turn is reported seen
+   * from the next call onward; a new turn starts an empty id set.
+   */
+  function lessonAlreadySeen(session: Session, turn: number, memoryId: string): boolean {
+    let entry = lessonSeen.get(session.id)
+    if (entry === undefined || entry.turn !== turn) {
+      entry = { turn, ids: new Set<string>() }
+      lessonSeen.set(session.id, entry)
+    }
+    if (entry.ids.has(memoryId)) return true
+    entry.ids.add(memoryId)
+    return false
+  }
+
+  /**
+   * The bounded experience-only lookup behind the action-lesson pass: the
+   * same controller / timer / step-signal shape as `syncRecall`, but a single
+   * recall through the mount's lesson lookup (`types: ['experience']`,
+   * `budget: 'low'`, no directives). Timeout, abort, or failure: `null`, and
+   * the step proceeds without a lesson row (failure isolation, mirroring
+   * `syncRecall`).
+   */
+  function lessonLookup(session: Session, query: string, signal: AbortSignal): Promise<LessonHit[] | null> {
+    return (async (): Promise<LessonHit[] | null> => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), config.autoContextTimeoutMs)
+      const onAbort = (): void => controller.abort()
+      if (!signal.aborted) signal.addEventListener('abort', onAbort, { once: true })
+      try {
+        return await mount.lessonRecall(query, controller.signal, session)
+      } catch {
+        return null
+      } finally {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', onAbort)
+      }
+    })()
+  }
+
+  /**
+   * The action-lesson commit: a tiny `form: 'notice'` marker row appended
+   * directly to the surface (never counted as a snapshot by
+   * `findRetainedSnapshots`, never retired by `recallPreserve: false`, and
+   * never riding the decision - the loop appends decision messages after the
+   * triggering message, and the lesson belongs to the PREVIOUS step's action).
+   * A refused append degrades to the untouched decision: the step proceeds.
+   */
+  function commitLesson(decision: PreStepDecision, session: Session, rendered: { text: string; summary: string }, tool: string, durationMs: number): PreStepDecision {
+    if (decision.kind !== 'enter') return decision
+    const message = createUserMessage({
+      content: [{ type: 'text', text: rendered.text }],
+      source: {
+        kind: 'plugin',
+        plugin: pluginName,
+        form: 'notice',
+        summary: boundContextSummary(rendered.summary),
+        label: `lesson:${tool} - ${durationMs}ms`,
+      },
+    })
+    try {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    } catch {
+      return decision
+    }
+    return decision
+  }
+
   const preStep = async ({ agent, messages, turn, step, signal }: PreStepPayload, next: () => Promise<PreStepDecision>): Promise<PreStepDecision> => {
     const decision = await next()
     const session = agent.session
@@ -488,6 +563,31 @@ export function buildAutoRecall(
             const query = composeRecallQuery(session, anchored.anchor, config.recallContextTurns, true, previous.seq)
             const result = await syncRecall(session, query, signal)
             if (result !== null) return commitSnapshot(decision, session, result.hits, result.rules, result.durationMs, anchored.kind)
+            // One bounded recall pass per step: the anchor was attempted and
+            // the budget spent, so the action-lesson pass stays out.
+            return decision
+          }
+        }
+      }
+      // The action-lesson pass (`actionLessons`, default off): one bounded
+      // experience-only recall anchored on the PREVIOUS step's committed
+      // tool calls, surfacing the matching failure lessons as a notice row
+      // (per-turn de-duplicated by memory id). The steering claim never
+      // reaches this (intervention above), and a no-tool-call previous step
+      // anchors nothing (no bank call).
+      if (config.actionLessons) {
+        const previous = previousStepAssistant(session, turn, step)
+        if (previous !== undefined) {
+          const anchored = lessonAnchor(previous.message)
+          if (anchored !== null) {
+            const startedAt = Date.now()
+            const hits = await lessonLookup(session, anchored.query, signal)
+            if (hits !== null) {
+              const fresh = hits.filter(hit => !lessonAlreadySeen(session, turn, hit.id))
+              if (fresh.length > 0) {
+                return commitLesson(decision, session, renderLesson(config.bank, anchored.tool, fresh.slice(0, config.actionLessonCandidates)), anchored.tool, Date.now() - startedAt)
+              }
+            }
           }
         }
       }
@@ -542,6 +642,7 @@ export function buildAutoRecall(
 
   const disposed = ({ agent }: DisposedPayload): void => {
     discardSlot(agent.session.id)
+    lessonSeen.delete(agent.session.id)
   }
 
   return { preStep, turnStopping, disposed }

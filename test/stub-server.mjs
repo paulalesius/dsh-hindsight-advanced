@@ -3,6 +3,10 @@
 // shape assertions.
 import http from 'node:http'
 
+// A memory unit's type: an experience marker stores a curatable raw fact,
+// an observation is consolidated, everything else is a world fact.
+const memoryType = memory => memory.experience ? 'experience' : memory.observation ? 'observation' : 'world'
+
 export const state = {
   memories: [],
   directives: [],
@@ -35,16 +39,21 @@ const server = http.createServer((req, res) => {
     if (req.method === 'POST' && rest[0] === 'memories' && rest.length === 1) {
       // retain. A retained text marked `[observation] ...` is stored as an
       // observation fact (marker stripped) so recall can exercise the
-      // observation type and its source-fact provenance.
+      // observation type and its source-fact provenance; `[experience] ...`
+      // likewise stores an experience fact (a raw lesson, curatable).
       const items = Array.isArray(data.items) ? data.items : []
       for (const item of items) {
         const content = String(item.content ?? '')
         const isObservation = content.startsWith('[observation] ')
+        const isExperience = content.startsWith('[experience] ')
         const memory = {
           id: `m${state.nextId++}`,
           bank,
-          text: isObservation ? content.slice('[observation] '.length) : content,
+          text: isObservation
+            ? content.slice('[observation] '.length)
+            : isExperience ? content.slice('[experience] '.length) : content,
           observation: isObservation,
+          experience: isExperience,
           tags: Array.isArray(item.tags) ? [...item.tags] : [],
         }
         // Emulate consolidation: the observation is backed by the most
@@ -74,12 +83,21 @@ const server = http.createServer((req, res) => {
           ? data.tags.every(tag => memory.tags.includes(tag))
           : memory.tags.length === 0 || data.tags.some(tag => memory.tags.includes(tag)))
       }
+      if (Array.isArray(data.types) && data.types.length > 0) {
+        hits = hits.filter(memory => data.types.includes(memoryType(memory)))
+      }
       const words = String(data.query ?? '').toLowerCase().split(/\W+/).filter(word => word.length > 3)
       const results = hits
         .filter(memory => words.some(word => memory.text.toLowerCase().includes(word)))
         .map(memory => {
-          const hit = { id: memory.id, text: memory.text, type: memory.observation ? 'observation' : 'world', tags: memory.tags }
+          const hit = { id: memory.id, text: memory.text, type: memoryType(memory), tags: memory.tags }
           if (memory.observation) hit.source_fact_ids = memory.source_fact_ids
+          // Deterministic score, like the real server: the query-word overlap,
+          // exposed on every result under `scores` (the plugin renders
+          // reranker ?? final from it).
+          const text = memory.text.toLowerCase()
+          const overlap = words.filter(word => text.includes(word)).length
+          hit.scores = { final: overlap, reranker: overlap, semantic: overlap, keyword: overlap }
           return hit
         })
       // Provenance, like the real server: sent only when the client requests
@@ -107,7 +125,7 @@ const server = http.createServer((req, res) => {
       const unit = {
         id: memory.id,
         text: memory.text,
-        type: memory.observation ? 'observation' : 'world',
+        type: memoryType(memory),
         state: memory.invalidated ? 'invalidated' : 'valid',
       }
       if (memory.observation) {
@@ -118,7 +136,7 @@ const server = http.createServer((req, res) => {
         unit.source_memories = sources.map(candidate => ({
           id: candidate.id,
           text: candidate.text,
-          type: candidate.observation ? 'observation' : 'world',
+          type: memoryType(candidate),
         }))
       }
       return json(200, unit)

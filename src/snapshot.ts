@@ -16,7 +16,7 @@
 
 import type { AssistantMessage, Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
 
-import type { DirectiveRule, RecallHit } from './types.ts'
+import type { DirectiveRule, LessonHit, RecallHit } from './types.ts'
 
 /** Bound for the recall query drawn from the user message. */
 export const MAX_QUERY_CHARS = 1000
@@ -209,6 +209,103 @@ export function midStepAnchor(
   if (anchor.length === 0) return null
   const kind: MidStepKind = parts.length === 2 ? 'think+text' : reasoning.length > 0 ? 'think' : 'text'
   return { anchor, kind }
+}
+
+/** Cap for a `bash` call's command text taken from a tool call's arguments
+ *  into the lesson query. */
+export const LESSON_COMMAND_CHARS = 300
+
+/** Cap for the whole lesson query (all of the previous step's tool calls,
+ *  one capped line each, newline-joined). */
+export const LESSON_QUERY_CHARS = 500
+
+/** Cap for one lesson's visible text on the lesson row. Lessons are short
+ *  (one or two sentences); the cap keeps the row compact. */
+export const LESSON_HIT_CHARS = 240
+
+/** One lesson lookup's anchor, extracted from the previous step's committed
+ *  assistant message's tool-call blocks. */
+export interface LessonAnchor {
+  /** The composed query: each tool call reduced to one capped line. */
+  query: string
+  /** The first tool call's name (the row's label tag). */
+  tool: string
+}
+
+/**
+ * One tool call's anchor line: a `bash` call contributes its command
+ * verbatim (capped at {@link LESSON_COMMAND_CHARS}); any other call
+ * contributes its name plus its scalar arguments as `key=value` pairs. An
+ * `arguments` value that is not a JSON object contributes nothing (the
+ * `tool-call` block carries the raw arguments as a JSON string).
+ */
+function toolCallLine(name: string, argumentsJson: string): string {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(argumentsJson)
+  } catch {
+    return ''
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return ''
+  const record = parsed as Record<string, unknown>
+  if (name === 'bash') {
+    const command = typeof record['command'] === 'string' ? record['command'].trim() : ''
+    if (command.length === 0) return ''
+    return `bash: ${command.slice(0, LESSON_COMMAND_CHARS)}`
+  }
+  const parts: string[] = [name]
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      parts.push(`${key}=${value}`)
+    }
+  }
+  return parts.join(' ')
+}
+
+/**
+ * The lesson anchor from a step's committed assistant message: every
+ * `tool-call` block reduced to one capped line (a `bash` call contributes
+ * its command; any other call contributes its name plus its scalar
+ * arguments), the lines joined with a newline and capped at
+ * {@link LESSON_QUERY_CHARS}. `null` when the message carries no tool-call
+ * block whose arguments parse to an object: the step matches nothing and
+ * the pre-step passes through.
+ */
+export function lessonAnchor(message: AssistantMessage): LessonAnchor | null {
+  if (!Array.isArray(message.content)) return null
+  const lines: string[] = []
+  let tool = ''
+  for (const block of message.content) {
+    if (block.type !== 'tool-call') continue
+    const line = toolCallLine(block.name, block.arguments)
+    if (line.length === 0) continue
+    if (tool.length === 0) tool = block.name
+    lines.push(line)
+  }
+  if (lines.length === 0) return null
+  return { query: lines.join('\n').slice(0, LESSON_QUERY_CHARS), tool }
+}
+
+/**
+ * The lesson row (committed as a `form: 'notice'` user message): a header
+ * naming the bank and the action, one compact line per lesson (text capped
+ * at {@link LESSON_HIT_CHARS}, newlines folded) with the bank's match score
+ * (the reranker's normalized score when the bank computed one, else the
+ * combined score) and the lesson's memory id (an `experience`-type memory
+ * is first-hand and curatable, so the id is surfaced the same way
+ * {@link renderRecall} does).
+ */
+export function renderLesson(bank: string, tool: string, hits: LessonHit[]): { text: string; summary: string } {
+  const lines = [`Past failure lessons from the Hindsight bank "${bank}" matching the previous step's ${tool} action:`]
+  for (const hit of hits) {
+    const raw = hit.text.replace(/\s*\n\s*/g, ' ')
+    const text = raw.length > LESSON_HIT_CHARS ? `${raw.slice(0, LESSON_HIT_CHARS).trimEnd()}...` : raw
+    const match = hit.score?.reranker ?? hit.score?.final
+    const score = typeof match === 'number' ? ` (match ${match.toFixed(3)})` : ''
+    lines.push(`- ${text}${score} id:${hit.id}`)
+  }
+  const text = lines.join('\n')
+  return { text, summary: `bank ${bank}: ${hits.length} past failure lesson${hits.length === 1 ? '' : 's'} for ${tool} action` }
 }
 
 /**

@@ -14,7 +14,10 @@ first step) and any HUMAN intervention claimed mid-turn (a bounded
 synchronous recall anchored on the steer itself), plus - opt-in via
 `recallAfterText` / `recallAfterReasoning` - any no-human mid-step (a
 bounded synchronous recall anchored on the previous step's committed
-text and/or reasoning), against
+text and/or reasoning), plus - opt-in via `actionLessons` - the
+failure-lesson pass (that same no-human mid-step matching the previous
+step's committed TOOL CALLS against the bank's `experience` memories
+and committing a notice row of past failure lessons), against
 a Hindsight bank. **No DSH
 source modifications, ever** — the whole surface is one entry file plus a
 small tree of dependency-light ESM TypeScript modules in `src/`, resolved
@@ -140,23 +143,70 @@ tree — preserve them when you change anything:
     bank** (self-cleaning, never touches the real banks). New behavior gets
     a check in `test/test.mjs`; wiring against the real API gets a live
     check.
+11. **The failure-lesson pass is a pre-step seam, not a tool-start
+   hook.** DSH exposes no tool-start event, so v1 cannot match a lesson
+   at the exact moment a command is about to run; it takes the closest
+   seam: the `agent/pre-step` hook of a LATER step of a running turn
+   whose claim carries no human message (`actionLessons`, default
+   `false`, gated by `autoContext`). The anchor is the PREVIOUS step's
+   committed assistant message's TOOL-CALL blocks (one line per call:
+   `bash: <command>` for bash, `name key=value` for scalar args; capped
+   at 500 chars), and the recall is bounded and restricted to the
+   bank's `experience`-type memories (the failure lessons), so a world
+   fact can never surface here. A match commits a `form: 'notice'` row
+   DIRECTLY through `session.append` - never riding the pre-step
+   decision - so the snapshot/unchanged machinery and
+   `findRetainedSnapshots` never see it and `recallPreserve` cannot
+   retire it; the row is labeled `lesson:<tool> - <ms>ms` and lists up
+   to `actionLessonCandidates` (default `10`) lesson lines (240 chars
+   each, with the match score and the memory's id). The per-turn dedupe
+   (by memory id, keyed by session) keeps a repeated match quiet while
+   the lookup still runs; the set resets with the turn. A previous step
+   without tool calls anchors nothing (no bank call); subagent sessions
+   are skipped BEFORE the block (total silence, no recall of any kind);
+   a steering claim never reaches the lesson code; a timeout or failure
+   is a silent discard; one bounded recall pass per step, no v1 score
+   threshold. A TRUE pre-execution hook (matching at the moment a
+   command is about to run) is the documented future path and needs a
+   DSH tool-start event.
 
 ## Layout
 
 | file | role |
 | --- | --- |
 | `hindsight-advanced.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + the three auto-recall listeners (pre-step, turn-stopping, disposed) |
-| `src/types.ts` | shared shapes (`RecallHit`, `RecallOptions`) |
+| `src/types.ts` | shared shapes (`RecallHit`, `RecallOptions`, `LessonHit`, `RecallScores`) |
 | `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
 | `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
 | `src/client.ts` | the REST transport: one bounded call, one clean bounded error shape |
-| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`read`/`invalidate`/`listDirectives`/`retainDirective` operations — **the extension point for new Hindsight operations** |
-| `src/snapshot.ts` | auto-recall surface logic: query derivation (from the step's messages, from the step's HUMAN message only for an intervention step (plugin-injected context is never an anchor), and from the session's durable log for the turn-stop prefetch — human `user/message` events only, so plugin snapshots are never queries) + the multi-turn composition (`composeRecallQuery`: the anchor under a `Prior context:` block of the last `recallContextTurns` prior human turns, one line per message, capped with oldest-first truncation), hit + standing-rules rendering (curatable hits carry their ids; an observation hit carries NO id of its own — it is derived and the bank refuses to curate it, so its id would render as the handle for exactly the call that 400s — with its source facts under it on `from:` lines — ids ONLY, no fact text (the consolidated observation supersedes its sources, so re-rendering their text would only duplicate the recall context), each the only curatable handle), the unchanged-recall marker (the applied memories, one compact line each), and the retained-snapshot lookup (an unchanged recall commits the marker instead of a duplicate block) + the mid-step anchor (`midStepAnchor`: the previous step's committed text and/or reasoning blocks, capped at 600 / 400 chars per kind, composed reasoning-first then text when both keys are on) + `previousStepAssistant` (the durable log's committed assistant message for (turn, step-1), the mid-step anchor's source) + `composeRecallQuery`'s optional `dropSeq` (the mid-step anchor is already on the log, so its own context line is dropped; the prefetch and intervention semantics are unchanged) |
+| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`read`/`invalidate`/`listDirectives`/`retainDirective`/`lessonRecall` operations — **the extension point for new Hindsight operations** |
+| `src/snapshot.ts` | auto-recall surface logic: query derivation (from the step's messages, from the step's HUMAN message only for an intervention step (plugin-injected context is never an anchor), and from the session's durable log for the turn-stop prefetch — human `user/message` events only, so plugin snapshots are never queries) + the multi-turn composition (`composeRecallQuery`: the anchor under a `Prior context:` block of the last `recallContextTurns` prior human turns, one line per message, capped with oldest-first truncation), hit + standing-rules rendering (curatable hits carry their ids; an observation hit carries NO id of its own — it is derived and the bank refuses to curate it, so its id would render as the handle for exactly the call that 400s — with its source facts under it on `from:` lines — ids ONLY, no fact text (the consolidated observation supersedes its sources, so re-rendering their text would only duplicate the recall context), each the only curatable handle), the unchanged-recall marker (the applied memories, one compact line each), and the retained-snapshot lookup (an unchanged recall commits the marker instead of a duplicate block) + the mid-step anchor (`midStepAnchor`: the previous step's committed text and/or reasoning blocks, capped at 600 / 400 chars per kind, composed reasoning-first then text when both keys are on) + `previousStepAssistant` (the durable log's committed assistant message for (turn, step-1), the mid-step anchor's source) + `composeRecallQuery`'s optional `dropSeq` (the mid-step anchor is already on the log, so its own context line is dropped; the prefetch and intervention semantics are unchanged) + the
+failure-lesson surface (`lessonAnchor` + `toolCallLine`: the previous
+step's committed tool-call blocks as one line per call - `bash:
+<command>` / `name key=value` - capped at 500 chars) and its rendering
+(`renderLesson`: the notice row, 240-char lesson lines, each with its
+match score and the memory's id) |
 | `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
-| `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup; a later step's HUMAN intervention anchors its own bounded synchronous lookup on the claimed steer; a later step whose claim carries NO human message takes the same bounded synchronous path when `recallAfterText` / `recallAfterReasoning` are on, anchored on the previous step's committed blocks and labeled by the anchor kind - the `syncRecall` helper (recall, then listDirectives, one combined `autoContextTimeoutMs` bound) shared by both synchronous paths) + surface commit, and `agent/disposed` cleanup |
+| `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup; a later step's HUMAN intervention anchors its own bounded synchronous lookup on the claimed steer; a later step whose claim carries NO human message takes the same bounded synchronous path when `recallAfterText` / `recallAfterReasoning` are on, anchored on the previous step's committed blocks and labeled by the anchor kind - the `syncRecall` helper (recall, then listDirectives, one combined `autoContextTimeoutMs` bound) shared by both synchronous paths) + the `actionLessons`
+failure-lesson pass (the previous step's committed tool calls anchor a
+bounded `experience`-only recall; a match commits a `form: 'notice'`
+row directly via `session.append`, de-duplicated per turn by memory id)
++ surface commit, and `agent/disposed` cleanup |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 53 checks, twelve mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot retiring the previous full card in place — a `form: 'notice'` tombstone marker in the old slot, shadow-priced by the adjacent log-only `compaction/prune` (old card's full price), while the full new card lands fresh after the triggering message on the decision (the durable log keeping both full snapshots) — an unchanged recall committing nothing, a refused retirement degrading to the append path with the orphaned price harmless, the twelfth the mid-step agent-output recall (`recallAfterText` / `recallAfterReasoning`): a no-human mid-step anchoring the recall on the previous step's committed text (the row labeled `recall:text`, the anchor's own context line dropped, the current turn's human line kept), a reasoning anchor (`recall:think`, the reasoning-only assistant message contributing no context line), both keys composing ONE anchor (reasoning first, then text, ONE recall, labeled `recall:think+text`), the steering claim winning the precedence over the anchor (the intervention path, plain label), a reasoning-only previous step anchoring nothing (pass-through, no bank call), the default-off keys leaving a no-human mid-step untouched, subagent steps staying silent at every step, and the `recallPreserve: false` interplay (the mid-step snapshot retiring the previous full card in place - tombstone + adjacent shadow price, the full card riding the decision with an empty claim; an unchanged mid-step recall a pure no-op, the lookup still ran, nothing committed) |
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 54 checks, thirteen mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot retiring the previous full card in place — a `form: 'notice'` tombstone marker in the old slot, shadow-priced by the adjacent log-only `compaction/prune` (old card's full price), while the full new card lands fresh after the triggering message on the decision (the durable log keeping both full snapshots) — an unchanged recall committing nothing, a refused retirement degrading to the append path with the orphaned price harmless, the twelfth the mid-step agent-output recall (`recallAfterText` / `recallAfterReasoning`): a no-human mid-step anchoring the recall on the previous step's committed text (the row labeled `recall:text`, the anchor's own context line dropped, the current turn's human line kept), a reasoning anchor (`recall:think`, the reasoning-only assistant message contributing no context line), both keys composing ONE anchor (reasoning first, then text, ONE recall, labeled `recall:think+text`), the steering claim winning the precedence over the anchor (the intervention path, plain label), a reasoning-only previous step anchoring nothing (pass-through, no bank call), the default-off keys leaving a no-human mid-step untouched, subagent steps staying silent at every step, and the `recallPreserve: false` interplay (the mid-step snapshot retiring the previous full card in place - tombstone + adjacent shadow price, the full card riding the decision with an empty claim; an unchanged mid-step recall a pure no-op, the lookup still ran,
+nothing committed), the thirteenth the failure-lesson pass
+(`actionLessons`): a no-human mid-step anchoring the recall on the
+previous step's committed TOOL CALLS (tool-call lines `bash:
+<command>` / `name key=value`, the query capped at 500 chars),
+experience-only (a world seed filtered out, budget low, 512-token
+bound), the match committing a `form: 'notice'` row directly (labeled
+`lesson:<tool>`, each line capped at 240 chars with its match score and
+memory id), up to `actionLessonCandidates` lines, per-turn dedupe by
+memory id (the lookup still runs; nothing re-commits; the turn reset
+re-surfaces), a text-only previous step anchoring nothing (no bank
+call), subagent steps staying silent, and the default-off keys leaving
+a no-human mid-step untouched) |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |
@@ -174,7 +224,7 @@ TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
 
-# the stub suite (53 checks)
+# the stub suite (54 checks)
 cd test && node --import ./register.mjs test.mjs
 
 # preset-mount verification (the custom agent preset row)

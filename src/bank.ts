@@ -17,13 +17,18 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { request } from './client.ts'
 import type { ResolvedConfig } from './config.ts'
 import { recallTags, scopeTags, type MemoryScope } from './tiers.ts'
-import type { DirectiveRule, MemoryUnit, RecallHit, RecallOptions } from './types.ts'
+import type { DirectiveRule, LessonHit, MemoryUnit, RecallHit, RecallOptions, RecallScores } from './types.ts'
 
 /** The response token budget for source-fact provenance on recall. The
  *  enrichment is post-selection (it cannot change which facts are recalled);
  *  the budget only bounds how many backing facts are returned for the hits
  *  that were. */
 const SOURCE_FACTS_TOKENS = 512
+
+/** The response token budget for lesson recall: failure lessons are short
+ *  (one or two sentences), and the client-side candidate cap bounds the
+ *  rendered row anyway. */
+const LESSON_MAX_TOKENS = 512
 
 /** One mounted bank and the operations against it. */
 export interface Mount {
@@ -41,6 +46,16 @@ export interface Mount {
     session: Session | undefined,
     options?: RecallOptions,
   ): Promise<RecallHit[]>
+  /** Failure-lesson recall for the action-lesson gate: an `experience`-type-
+   *  only, low-budget recall (no source-fact provenance, no observation
+   *  preference) that preserves the bank's per-stage ranking scores on each
+   *  hit, so the surfaced row can show how strongly a past failure lesson
+   *  matched the action. Same tier scoping as {@link recall}. */
+  lessonRecall(
+    query: string,
+    signal: AbortSignal,
+    session: Session | undefined,
+  ): Promise<LessonHit[]>
   /** Store a durable memory tagged with `session`'s tier for `scope`
    *  (`undefined` session: the global tier, visible everywhere). `timestamp`,
    *  when the caller knows when the content OCCURRED (an ISO 8601 date or
@@ -204,6 +219,50 @@ export function createMount(
             if (typeof text === 'string' && text.trim().length > 0) sources.push({ id, text: text.trim() })
           }
           return sources.length > 0 ? { ...hit, sources } : hit
+        })
+    },
+
+    async lessonRecall(query, signal, session): Promise<LessonHit[]> {
+      await syncBankConfig(signal)
+      // Failure lessons are first-hand experience memories: the explicit
+      // `experience` restriction overrides the consolidation-mode types
+      // (the same precedent the model's recall action uses for an explicit
+      // types list), and the observation preference no-ops server-side. No
+      // source-fact enrichment: lessons need no provenance block. The bank's
+      // standard pipeline still runs (vector + rerank): this bank's measured
+      // vector-vs-rerank divergence makes the rerank pass non-optional, and
+      // `budget: 'low'` plus the small token budget keep the pass fast.
+      const body: Record<string, unknown> = {
+        query,
+        max_tokens: LESSON_MAX_TOKENS,
+        types: ['experience'],
+        budget: 'low',
+      }
+      withTierFilter(body, session)
+      const data = await call(`${bankPath}/memories/recall`, body, signal)
+      const results = data.results
+      if (!Array.isArray(results)) return []
+      /** A raw lesson recall hit as returned by the server: the surfaced
+       *  shape plus the per-stage scores field (kept only when it carries a
+       *  usable `final`). */
+      type RawLessonHit = LessonHit & { scores?: unknown }
+      return results
+        .filter((hit): hit is RawLessonHit =>
+          typeof hit === 'object' && hit !== null
+          && typeof (hit as LessonHit).id === 'string'
+          && typeof (hit as LessonHit).text === 'string',
+        )
+        .map((hit): LessonHit => {
+          const raw = hit.scores
+          if (typeof raw !== 'object' || raw === null) return hit
+          const record = raw as Record<string, unknown>
+          if (typeof record['final'] !== 'number') return hit
+          const score: RecallScores = { final: record['final'] }
+          for (const key of ['reranker', 'semantic', 'keyword'] as const) {
+            const value = record[key]
+            if (typeof value === 'number') score[key] = value
+          }
+          return { ...hit, score }
         })
     },
 

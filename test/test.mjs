@@ -73,6 +73,8 @@ assert.deepEqual(standard.value, {
   retainAsync: false,
   maxRecallTokens: 4096,
   autoContextTimeoutMs: 2500,
+  actionLessons: false,
+  actionLessonCandidates: 10,
   retainScope: 'preset',
 })
 
@@ -1513,6 +1515,123 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(pete.session.events.filter(event => event.type === 'compaction/prune').length, 1, 'no second price')
   assert.equal(midstep4Recalls().length, 3, 'the lookup still ran (deterministic stub); nothing was committed')
   console.log('ok  mount L: recallPreserve false retires the previous card for a mid-step snapshot (tombstone, shadow price); unchanged = no-op')
+}
+
+// ── mount M: action lessons (experience recall anchored on the previous step's tool call) ─
+{
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'lessons', prefetch: false, actionLessons: true })
+  const listener = ctx.listeners[0].fn
+  const tool = ctx.tools.registered[0]
+  const max = { session: makeSession('sess-m1') }
+  const sub = { session: makeSession('sess-m2', { origin: 'subagent' }) }
+  const lessonRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/lessons/memories/recall')
+  const lessonRows = session => session.events.filter(event =>
+    event.type === 'user/message'
+    && event.data.source?.kind === 'plugin'
+    && event.data.source.plugin === 'hindsight-advanced'
+    && event.data.source.form === 'notice',
+  )
+  const bashCall = (id, command) => ({ id, type: 'tool-call', name: 'bash', arguments: JSON.stringify({ command }) })
+  const commitCommand = 'git commit -m "use the quoted heredoc form for the message"'
+
+  // Twelve near-identical stress-run lessons: they share words with the
+  // turn-1 command and none with the commit command below. Seeded first so
+  // their insertion order is the render order (the stub returns hits
+  // unsorted, the plugin never sorts).
+  for (let n = 1; n <= 12; n += 1) {
+    await tool.execute({ action: 'retain', text: `[experience] stressbenchmark probe payload workload run finished on attempt number ${n}.` }, { signal: baseSignal })
+  }
+  // The two commit lessons, plus a world memory that must never surface in a
+  // lesson row (the lookup is experience-only).
+  await tool.execute({ action: 'retain', text: '[experience] git commit without a quoted heredoc form breaks the shell when the message carries an apostrophe.' }, { signal: baseSignal })
+  await tool.execute({ action: 'retain', text: '[experience] the heredoc form of the commit message must be quoted or the shell breaks.' }, { signal: baseSignal })
+  await tool.execute({ action: 'retain', text: 'The heredoc tooling documentation lives in the repo.' }, { signal: baseSignal })
+  const seedA = state.memories.find(memory => memory.text.startsWith('git commit without a quoted heredoc'))
+  const seedB = state.memories.find(memory => memory.text.startsWith('the heredoc form of the commit message'))
+
+  // Turn 1: the previous step's bash action anchors the lookup; the twelve
+  // near-identical hits cap at actionLessonCandidates (10).
+  await runStepAt(listener, max, 1, 1, [userMsg('warm up the bank')])
+  asstStep(max.session, 1, 1, [bashCall('tc-m1', 'stressbenchmark probe payload workload run')])
+  await runStepAt(listener, max, 1, 2, [])
+  let rows = lessonRows(max.session)
+  assert.equal(rows.length, 1, 'one lesson row for the action step')
+  assert.match(rows[0].data.source.label, /^lesson:bash - \d+ms$/)
+  const capBody = rows[0].data.content[0].text
+  assert.ok(capBody.includes("matching the previous step's bash action:"))
+  assert.equal(capBody.split('\n').filter(line => line.startsWith('- ')).length, 10, 'the render cap keeps the first 10 of 12 hits')
+  assert.ok(capBody.includes('number 10'))
+  assert.ok(!capBody.includes('number 11') && !capBody.includes('number 12'), 'the last two hits are cut')
+  assert.ok(capBody.includes('(match 4.000)'))
+  assert.equal(rows[0].data.source.summary, 'bank lessons: 10 past failure lessons for bash action')
+
+  // Turn 2: the git commit action matches the two commit lessons (the world
+  // memory stays out); the lookup is experience-only, low-budget, and
+  // anchored on the previous step's bash command.
+  await runStepAt(listener, max, 2, 1, [userMsg('commit the changes with a heredoc quoted message')])
+  asstStep(max.session, 2, 1, [bashCall('tc-m2', commitCommand)])
+  const beforeMain = lessonRecalls().length
+  await runStepAt(listener, max, 2, 2, [])
+  rows = lessonRows(max.session)
+  assert.equal(rows.length, 2, 'a second lesson row for the commit action')
+  const mainRow = rows[1]
+  const mainBody = mainRow.data.content[0].text
+  assert.equal(mainBody.split('\n').filter(line => line.startsWith('- ')).length, 2, 'exactly the two commit lessons')
+  assert.ok(mainBody.includes(`id:${seedA.id}`))
+  assert.ok(mainBody.includes(`id:${seedB.id}`))
+  assert.ok(!mainBody.includes('tooling documentation'), 'the world memory is filtered out')
+  assert.equal(mainBody.match(/\(match 5\.000\)/g).length, 2, 'each hit carries its deterministic stub score')
+  assert.equal(mainRow.data.source.summary, 'bank lessons: 2 past failure lessons for bash action')
+  const mainRequest = lessonRecalls()[beforeMain]
+  assert.deepStrictEqual(mainRequest.body.types, ['experience'], 'experience-only lookup')
+  assert.equal(mainRequest.body.budget, 'low')
+  assert.equal(mainRequest.body.max_tokens, 512)
+  assert.ok(String(mainRequest.body.query).startsWith('bash: git commit'), 'the query is anchored on the previous step\'s bash command')
+
+  // De-duplication: the same action later in the turn re-runs the lookup but
+  // commits nothing new.
+  asstStep(max.session, 2, 2, [bashCall('tc-m3', commitCommand)])
+  const beforeDedupe = lessonRecalls().length
+  await runStepAt(listener, max, 2, 3, [])
+  assert.equal(lessonRows(max.session).length, 2, 'every hit was already surfaced this turn')
+  assert.equal(lessonRecalls().length, beforeDedupe + 1, 'the lookup still ran (budget spent)')
+
+  // A new turn resets the per-turn set.
+  await runStepAt(listener, max, 4, 1, [userMsg('commit the changes again')])
+  asstStep(max.session, 4, 1, [bashCall('tc-m4', commitCommand)])
+  await runStepAt(listener, max, 4, 2, [])
+  assert.equal(lessonRows(max.session).length, 3, 'a new turn re-surfaces the same lessons')
+
+  // A previous step without a tool call anchors nothing: step 2 adds no bank
+  // call (only step 1's standard recall ran).
+  const beforePassthrough = lessonRecalls().length
+  await runStepAt(listener, max, 5, 1, [userMsg('no action this turn')])
+  asstStep(max.session, 5, 1, [textBlock('Just text, no action.')])
+  await runStepAt(listener, max, 5, 2, [])
+  assert.equal(lessonRows(max.session).length, 3)
+  assert.equal(lessonRecalls().length, beforePassthrough + 1, 'only the first step\'s standard recall ran')
+
+  // Subagent sessions stay silent at every step (no recall of any kind).
+  const beforeSub = lessonRecalls().length
+  await runStepAt(listener, sub, 1, 1, [userMsg('warm up the bank')])
+  asstStep(sub.session, 1, 1, [bashCall('tc-m5', commitCommand)])
+  await runStepAt(listener, sub, 1, 2, [])
+  assert.equal(lessonRows(sub.session).length, 0, 'subagent steps commit no lesson rows')
+  assert.equal(lessonRecalls().length, beforeSub, 'subagent steps issue no lookups at all')
+
+  // Default off: with the key absent the mid-step is untouched.
+  const ctxOff = makeCtx()
+  plugin.apply(ctxOff, { ...standard.value, baseUrl: stubUrl, bank: 'lessons', prefetch: false })
+  const offListener = ctxOff.listeners[0].fn
+  const off = { session: makeSession('sess-m4') }
+  const beforeOff = lessonRecalls().length
+  await runStepAt(offListener, off, 1, 1, [userMsg('commit the changes')])
+  asstStep(off.session, 1, 1, [bashCall('tc-m6', commitCommand)])
+  await runStepAt(offListener, off, 1, 2, [])
+  assert.equal(lessonRows(off.session).length, 0, 'the default-off key leaves the mid-step untouched')
+  assert.equal(lessonRecalls().length, beforeOff + 1, 'only the first step\'s standard recall ran')
+  console.log("ok  mount M: actionLessons - the previous step's tool call anchors an experience-only lesson recall (capped, de-duplicated per turn, notice row)")
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

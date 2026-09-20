@@ -16,6 +16,29 @@ export interface RecallHit {
   sources?: { id: string; text: string }[]
 }
 
+/** The per-stage ranking scores the bank attaches to a recall result
+ *  (`scores`): the combined score that ordered the results (reranker plus
+ *  the bank's recency / temporal / proof boosts), and the per-stage
+ *  components when the bank computed them. */
+export interface RecallScores {
+  /** The combined ranking score. Always present on a scored result. */
+  final: number
+  /** The normalized 0-1 cross-encoder score, when a rerank ran. */
+  reranker?: number | null
+  /** The vector-similarity score, when the bank returned one. */
+  semantic?: number | null
+  /** The keyword-overlap score, when the bank returned one. */
+  keyword?: number | null
+}
+
+/** One lesson recall hit: an `experience`-type memory (a past failure
+ *  lesson) whose bank ranking scores were preserved, so the surfaced row
+ *  can show how strongly the lesson matched the action. */
+export interface LessonHit extends RecallHit {
+  /** The bank's per-stage ranking scores for this hit. */
+  score?: RecallScores
+}
+
 /** One active directive — a standing rule stored in a bank — as the mount
  *  sees it. */
 export interface DirectiveRule {

@@ -70,6 +70,20 @@
         # lookups. A steering claim always wins the precedence.
         # recallAfterReasoning: false
 
+        # false - off. true - the failure-lesson pass: a LATER step of a
+        # running turn whose claim carries no human message matches the
+        # previous step's committed TOOL CALLS against the bank'
+        # experience-type memories (failure lessons); a match commits a
+        # collapsed notice row (labeled `lesson:<tool> - <ms>ms`) listing
+        # up to actionLessonCandidates lessons, de-duplicated per turn by
+        # memory id. A previous step without tool calls anchors nothing
+        # (no bank call); subagent sessions stay silent.
+        # actionLessons: false
+
+        # The cap on how many lesson lines the notice row renders (the
+        # recall is unbounded by this key; the row keeps the first N).
+        # actionLessonCandidates: 10
+
         # true — the model surface is append-only: every committed recall
         # snapshot stays in the model context. false — the surface carries
         # only the LATEST full snapshot: each new one retires the

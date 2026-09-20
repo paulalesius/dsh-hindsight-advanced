@@ -52,6 +52,21 @@ export interface ResolvedConfig {
    *  steering claim always wins the precedence over either anchor (the
    *  intervention path). */
   recallAfterReasoning: boolean
+  /** `true`: at a LATER step of a running turn, the previous step's
+   *  committed tool calls are matched against the bank's `experience`-type
+   *  memories (past failure lessons) and the best matches are committed as
+   *  a `form: 'notice'` row labeled `lesson:<tool> - <ms>ms`. The branch
+   *  runs only when the mid-step anchor branch (the `recallAfterText` /
+   *  `recallAfterReasoning` keys) did not attempt a recall of its own: one
+   *  bounded recall pass per step. A steering claim wins the precedence
+   *  over the branch; lessons already surfaced this turn are never repeated.
+   *  Default `false`. Gated by `autoContext` like the other automatic
+   *  branches. */
+  actionLessons: boolean
+  /** Cap on the number of lessons rendered on one action-lesson row (the
+   *  bank's recall may return more; the surplus is dropped before render).
+   *  Default 10. */
+  actionLessonCandidates: number
   /** `true` (default): the model surface is append-only for the snapshots —
    *  every committed recall stays in the model context. `false`: the
    *  surface carries only the LATEST snapshot — each new one replaces the
@@ -85,6 +100,9 @@ const DEFAULT_AUTO_CONTEXT_TIMEOUT_MS = 2500
  *  (the reference Hindsight integrations' default is 1; the plugin's is 5
  *  — the `Prior context:` block is the query's first-class part). */
 const DEFAULT_RECALL_CONTEXT_TURNS = 5
+/** How many action-lesson hits the lesson row renders by default (the
+ *  client-side cap applied before render; see {@link ResolvedConfig.actionLessonCandidates}). */
+const DEFAULT_ACTION_LESSON_CANDIDATES = 10
 /** Credential-reference grammar (a POSIX shell identifier), matching the
  *  credentials seam's own `CredentialRef` so an invalid name is a config
  *  issue rather than a per-call resolution surprise. */
@@ -238,6 +256,8 @@ export const Config: {
         recallContextTurns: intFlag(record, 'recallContextTurns', DEFAULT_RECALL_CONTEXT_TURNS, issues),
         recallAfterText: boolFlag(record, 'recallAfterText', false, issues),
         recallAfterReasoning: boolFlag(record, 'recallAfterReasoning', false, issues),
+        actionLessons: boolFlag(record, 'actionLessons', false, issues),
+        actionLessonCandidates: intFlag(record, 'actionLessonCandidates', DEFAULT_ACTION_LESSON_CANDIDATES, issues),
         recallPreserve: boolFlag(record, 'recallPreserve', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),
