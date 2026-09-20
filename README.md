@@ -94,6 +94,9 @@ server at all. The first turn of a conversation has nothing to read ahead
 of, so it waits on the server normally (up to `autoContextTimeoutMs`).
 Set `prefetch: false` to query the message you just sent instead — at the
 cost of that wait on every turn.
+Each note's row shows how long its lookup took (for example
+`recall - 12ms`) in place of the plugin name — expand the row to see the
+producer.
 The query is not just that one message: with the default
 `recallContextTurns: 5`, the last few turns of the conversation ride
 along under a `Prior context:` block (one line per message, capped at

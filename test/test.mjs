@@ -378,6 +378,8 @@ async function runStep(listener, a, step, messages) {
   assert.equal(snaps1[0].seq, agent.session.events.at(-2).seq + 1, 'the row lands right after the triggering message')
   assert.match(snaps1[0].data.content[0].text, /Relevant memories from the Hindsight bank "hermes"/)
   assert.match(snaps1[0].data.content[0].text, /prefers tabs over spaces/)
+  assert.match(snaps1[0].data.source.label, /^recall - \d+ms$/, 'the row label is the lookup wall clock, e.g. "recall - 3ms"')
+  assert.equal(snaps1[0].data.source.plugin, 'hindsight-advanced', 'the plugin stays the attribution identity beside the label')
   const autoReq = state.requests.filter(request =>
     request.path === '/v1/default/banks/hermes/memories/recall'
     && request.body.query === 'which editor does the user prefer?',
@@ -886,6 +888,7 @@ async function runStep(listener, a, step, messages) {
   const second = snapshots(alice.session).at(-1)
   assert.ok(second, 'turn 2 commits a snapshot from the cache')
   assert.match(second.data.content[0].text, /managed Postgres/, 'the cached snapshot carries the job\'s view of the bank')
+  assert.match(second.data.source.label, /^recall - \d+ms$/, 'the cached snapshot carries the job wall clock as its row label')
   state.recallDelayMs = 0
 
   // An unchanged cached recall commits no duplicate block (no churn): the

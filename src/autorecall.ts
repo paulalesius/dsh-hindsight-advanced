@@ -11,7 +11,10 @@
  * pre-step decision, which the loop appends to the first step of each
  * turn right after the message that triggered the recall — so the
  * context row lands in the transcript below that message, newest at the
- * bottom, and never above it.
+ * bottom, and never above it. Each snapshot's source carries a
+ * per-message `label` (`recall - <ms>ms`, the lookup's wall clock) that
+ * the collapsed context row displays in place of the plugin name; the
+ * `plugin` field stays the attribution identity.
  *
  * The lookup is bounded: a stopped or slow server costs at most
  * `autoContextTimeoutMs` and the turn proceeds without memory. To keep a
@@ -130,6 +133,8 @@ export interface DisposedPayload {
 interface PrefetchedTurn {
   hits: RecallHit[]
   rules: DirectiveRule[]
+  /** Wall-clock ms of the recall + directive listing (the row's label). */
+  durationMs: number
 }
 
 /** One in-flight or finished prefetch: its controller and its result. */
@@ -239,6 +244,7 @@ export function buildAutoRecall(
         // Both lookups run together, like the synchronous path: one result
         // or no result. The job has no turn to serve, so no per-turn
         // budget — only its controller (discards and the TTL) bounds it.
+        const startedAt = Date.now()
         const recallPromise = query.length > 0
           ? mount.recall(query, controller.signal, session)
           : Promise.resolve<RecallHit[]>([])
@@ -246,7 +252,7 @@ export function buildAutoRecall(
           recallPromise,
           mount.listDirectives(controller.signal, session),
         ])
-        return { hits, rules }
+        return { hits, rules, durationMs: Date.now() - startedAt }
       })(),
     }
     // A failed job deletes its own slot — if it is still the current one,
@@ -289,6 +295,7 @@ export function buildAutoRecall(
     session: Session,
     hits: RecallHit[],
     rules: DirectiveRule[],
+    durationMs: number,
   ): PreStepDecision {
     if (decision.kind !== 'enter') return decision
     if (hits.length === 0 && rules.length === 0) return decision
@@ -304,7 +311,7 @@ export function buildAutoRecall(
       if (latest !== undefined && latest.text === text) return decision
       const snapshot = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', sections: [{ name: pluginName, text }] },
+        source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label: `recall - ${durationMs}ms`, sections: [{ name: pluginName, text }] },
       })
       try {
         if (latest !== undefined) {
@@ -368,7 +375,7 @@ export function buildAutoRecall(
     const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, rules) : text
     const appended = createUserMessage({
       content: [{ type: 'text', text: committed }],
-      source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', sections: [{ name: pluginName, text: committed }] },
+      source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label: `recall - ${durationMs}ms`, sections: [{ name: pluginName, text: committed }] },
     })
     return { kind: 'enter', messages: [...decision.messages, appended] }
   }
@@ -401,7 +408,7 @@ export function buildAutoRecall(
       } catch {
         return decision
       }
-      return commitSnapshot(decision, session, prefetched?.hits ?? [], prefetched?.rules ?? [])
+      return commitSnapshot(decision, session, prefetched?.hits ?? [], prefetched?.rules ?? [], prefetched?.durationMs ?? 0)
     }
     // No slot: the first turn, or the previous job failed (its failure
     // deleted the slot) — the original bounded synchronous path. The anchor
@@ -414,7 +421,12 @@ export function buildAutoRecall(
     // is cheap, and the shared timeout still bounds the total).
     let hits: RecallHit[] = []
     let rules: DirectiveRule[] = []
+    // Wall clock for the row label: how long the bounded recall + directive
+    // pair took. Only committed on success — a timed-out or failed pair
+    // returns without a snapshot, so the label is real bank latency.
+    let durationMs = 0
     try {
+      const startedAt = Date.now()
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), config.autoContextTimeoutMs)
       const onAbort = (): void => controller.abort()
@@ -429,10 +441,11 @@ export function buildAutoRecall(
         clearTimeout(timer)
         signal.removeEventListener('abort', onAbort)
       }
+      durationMs = Date.now() - startedAt
     } catch {
       return decision
     }
-    return commitSnapshot(decision, session, hits, rules)
+    return commitSnapshot(decision, session, hits, rules, durationMs)
   }
 
   const turnStopping = ({ agent, signal }: TurnStoppingPayload): void => {
