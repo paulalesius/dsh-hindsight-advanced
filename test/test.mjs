@@ -427,17 +427,37 @@ async function runStep(listener, a, step, messages) {
   assert.equal(afterMarker, snapsUnchanged + 1, 'one marker row, no duplicate block')
   console.log('ok  mount A: an unchanged recall commits a marker naming the applied memories, not a duplicate block')
 
-  // step 2 and subagents pass through unchanged, without committing snapshots
-  const d4 = await runStep(listener, agent, 2, [userMsg('steering mid-turn')])
-  assert.equal(d4.messages.length, 1)
-  assert.equal(snapshots(agent.session).length, afterMarker, 'step 2 commits no snapshot')
+  // A HUMAN intervention claimed at step 2 recalls on the bounded
+  // synchronous path, anchored on the steering itself (the loop skips the
+  // turn-stop prefetch while a steer is queued, so the step owns no cache),
+  // and commits its snapshot onto the step's decision. recallContextTurns: 1
+  // makes the query exactly the anchor, so the stub sees the steer verbatim.
+  const d4 = await runStep(listener, agent, 2, [userMsg('wait, the demo build must run on Node 22')])
+  assert.equal(d4.messages.length, 2, 'the intervention snapshot rides the step decision')
+  assert.match(d4.messages.at(-1).content[0].text, /Node 22/, 'the intervention recall names the matched memory')
+  assert.match(d4.messages.at(-1).source.label, /^recall - \d+ms$/, 'the intervention row carries the same label')
+  assert.equal(d4.messages.at(-1).source.plugin, 'hindsight-advanced', 'the plugin stays the attribution identity')
+  const interventionReq = state.requests.filter(request =>
+    request.path === '/v1/default/banks/hermes/memories/recall'
+    && request.body.query === 'wait, the demo build must run on Node 22',
+  ).at(-1)
+  assert.ok(interventionReq, 'the intervention recall queried the steer itself')
+  const afterIntervention = snapshots(agent.session).length
+  assert.equal(afterIntervention, afterMarker + 1, 'the intervention commits its snapshot')
+  // A step-2 claim WITHOUT a human message (plugin-injected context alone)
+  // is not an intent: no recall, no snapshot.
+  const injectedContext = { id: `inj${Math.random()}`, role: 'user', content: [{ type: 'text', text: 'injected plugin context' }], source: { kind: 'plugin', plugin: 'other-plugin', form: 'notice' } }
+  const d4b = await runStep(listener, agent, 2, [injectedContext])
+  assert.equal(d4b.messages.length, 1, 'a non-human step-2 claim rides no snapshot')
+  assert.equal(snapshots(agent.session).length, afterIntervention, 'no recall for a plugin-context claim')
+  // subagents pass through unchanged, without committing snapshots
   const d5 = await runStep(listener, subagent, 1, [userMsg('subagent work')])
   assert.equal(d5.messages.length, 1)
   assert.equal(snapshots(subagent.session).length, 0, 'subagents get no snapshot')
   // rejections pass through untouched
   const reject = await listener({ agent, messages: [userMsg('x')], turn: 9, step: 1, signal: baseSignal }, async () => ({ kind: 'reject' }))
   assert.equal(reject.kind, 'reject')
-  console.log('ok  mount A: step 2, subagents, and rejections pass through')
+  console.log('ok  mount A: a human intervention at step 2 recalls; non-human claims, subagents, and rejections pass through')
 }
 
 // ── mount B: bank dsh-code — a separate bank is a separate surface ──────────

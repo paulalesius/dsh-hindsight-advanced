@@ -6,6 +6,15 @@
  * own section, so a stored rule reaches the model every turn even when the
  * recall matches nothing.
  *
+ * A HUMAN intervention claimed at a later step of a running turn (steering
+ * delivered while the agent is mid-turn) is recalled the same way, on the
+ * bounded synchronous path anchored on the intervention itself: the loop
+ * delivers steering at the next step boundary and skips the turn-stopping
+ * prefetch while a steer is still queued, so that step owns no cache and
+ * waits on the server at most `autoContextTimeoutMs`. A step claim without
+ * a human message (plugin-injected context alone) is not an intent and
+ * recalls nothing.
+ *
  * Assembly runs BEFORE the pre-step waterfall, so the memory cannot ride
  * the system prompt for its own turn; the snapshot instead rides the
  * pre-step decision, which the loop appends to the first step of each
@@ -80,7 +89,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
-import { composeRecallQuery, findRetainedSnapshots, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
+import { composeRecallQuery, findRetainedSnapshots, queryFromHumanMessages, queryFromMessages, queryFromSession, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
 import type { DirectiveRule, RecallHit } from './types.ts'
 
 /**
@@ -177,7 +186,11 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  *
  * - `preStep` (registered with `{ prepend: true }`) — consumes the previous
  *   turn's cached prefetch if it is ready, else takes the original bounded
- *   synchronous path, and commits the snapshot onto the step-1 decision;
+ *   synchronous path, and commits the snapshot onto the step-1 decision; a
+ *   later step's HUMAN intervention anchors its own bounded synchronous
+ *   lookup (the loop skips the prefetch while a steer is queued, so the
+ *   step owns no cache) and commits the snapshot onto that step's
+ *   decision;
  * - `turnStopping` — starts the detached prefetch for the closing turn
  *   (only while `prefetch` is on);
  * - `disposed` — aborts and drops the session's slot.
@@ -389,16 +402,26 @@ export function buildAutoRecall(
       discardSlot(session.id)
       return decision
     }
-    if (!config.autoContext || step !== 1) return decision
+    if (!config.autoContext) return decision
     // Subagent sessions share this mount through the parent preset, but their
     // task context is owned by the delegating prompt; surfacing bank memory
     // there only dilutes it.
     if (session.header?.origin === 'subagent') return decision
+    // A later step of a running turn claims the steering delivered at its
+    // boundary (an intervention): recall it on the bounded synchronous path
+    // anchored on the intervention itself (the loop skips the
+    // turn-stopping prefetch while a steer is queued, so the step owns no
+    // cache). A claim without a human message (plugin-injected context
+    // alone) is not an intent and recalls nothing.
+    const intervention = step > 1 ? queryFromHumanMessages(messages) : ''
+    if (step > 1 && intervention.length === 0) return decision
     // The previous turn's prefetch, if it is here: ready results are free,
     // in-flight ones get the same budget the synchronous path would have
     // spent, and a timeout means this turn proceeds without memory — the
     // same cost as today's slow-server case, minus the attempt that already
-    // ran for free last turn.
+    // ran for free last turn. A slot is always consumed or discarded at
+    // step 1, so this branch is unreachable at a later step (an
+    // intervention can never consume a stale prefetch).
     const entry = slots.get(session.id)
     if (entry !== undefined) {
       slots.delete(session.id)
@@ -410,11 +433,14 @@ export function buildAutoRecall(
       }
       return commitSnapshot(decision, session, prefetched?.hits ?? [], prefetched?.rules ?? [], prefetched?.durationMs ?? 0)
     }
-    // No slot: the first turn, or the previous job failed (its failure
-    // deleted the slot) — the original bounded synchronous path. The anchor
-    // is not on the log yet (the pre-step fires before the turn's messages
-    // are appended), so the log holds the prior turns only.
-    const latest = queryFromMessages(messages)
+    // No slot: the first turn, the previous job failed (its failure deleted
+    // the slot), or an intervention step (whose anchor is the claimed steer
+    // itself): the original bounded synchronous path. The anchor is not on
+    // the log yet (the pre-step fires before the step's messages are
+    // appended), so the log holds the prior turns only: for an
+    // intervention, that includes the running turn's earlier steps, which
+    // compose as the context the steer refines.
+    const latest = step > 1 ? intervention : queryFromMessages(messages)
     const query = composeRecallQuery(session, latest, config.recallContextTurns, false)
     // Both lookups ride ONE bounded budget: the shared controller aborts the
     // whole pair at autoContextTimeoutMs (sequential — the directives list

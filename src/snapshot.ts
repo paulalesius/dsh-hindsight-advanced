@@ -123,6 +123,26 @@ export function queryFromMessages(messages: readonly UserMessage[]): string {
   return ''
 }
 
+/** The latest HUMAN message's text among the step's claimed messages: the
+ *  recall anchor for an intervention step. A later step's claim can carry
+ *  plugin-injected user-role context rows alongside the steering, and a
+ *  claim that holds only plugin context (or no text at all) is not an
+ *  intent: `''` means the step recalls nothing. */
+export function queryFromHumanMessages(messages: readonly UserMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message === undefined || message.source?.kind !== 'user') continue
+    if (!Array.isArray(message.content)) continue
+    const text = message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join(' ')
+      .trim()
+    if (text.length > 0) return text.slice(0, MAX_QUERY_CHARS)
+  }
+  return ''
+}
+
 /** The last HUMAN message on `session`'s durable log, as a recall query —
  *  the turn-stopping prefetch needs it because that event carries no
  *  messages. Scans the log from the end (the tail is never shadowed by

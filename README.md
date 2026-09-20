@@ -73,7 +73,7 @@ Two things to know about the row:
 | `baseUrl` | `http://127.0.0.1:8888` | Your Hindsight server's address. |
 | `apiKeyRef` | — | **The way to give the plugin its key** — a *name* for the secret, not the secret itself. The value is looked up on every call (environment → `~/.dsh/.credentials.yaml` → `.env` files), so rotating the key needs no restart and the key never sits in a config file. See below. |
 | `apiKey` | — | A plain key in the config, instead of a reference. Prefer `apiKeyRef`. |
-| `autoContext` | `true` | Set `false` to turn off the automatic per-turn recall (the `hindsight` tool stays). |
+| `autoContext` | `true` | Set `false` to turn off the automatic recall (each turn's first step and any human intervention claimed mid-turn; the `hindsight` tool stays). |
 | `prefetch` | `true` | `true` (default): the recall starts as the *previous* turn ends, so from the second turn on it targets the previous message. `false`: every turn queries the message you just sent and waits on the server for it — the memory is always relevant to what you just said, at the cost of the server's latency on every first model call. |
 | `recallContextTurns` | `5` | How many of your recent turns ride along in the recall's query, so the bank can match memories against what the conversation was about, not just the last message. The query is the anchor message under a `Prior context:` block of the recent prior turns (one line per user/assistant message), capped at 1000 characters with the oldest lines dropped first. `1` (what the reference integrations ship) is the plain single-message query. |
 | `recallPreserve` | `true` | `true` (the default): the model context is append-only — every committed recall snapshot stays in the conversation, so later turns see the memories that were recalled earlier. `false`: the model context carries only the *latest* full snapshot — each new one retires the previous full card in place (a one-line tombstone marker stays where that turn's recall fired, its full tokens metered out of the pricing) and lands as a fresh card at its own turn, while the durable session log keeps every full snapshot for replay and audit. The naming matches llama-server's `--no-reasoning-preserve`: with it off, a turn's snapshot, like its reasoning, lives for that turn only. |
@@ -94,6 +94,12 @@ server at all. The first turn of a conversation has nothing to read ahead
 of, so it waits on the server normally (up to `autoContextTimeoutMs`).
 Set `prefetch: false` to query the message you just sent instead — at the
 cost of that wait on every turn.
+If you send a message while the agent is already working, the recall
+follows it: when the agent picks the intervention up at its next step it
+recalls the bank on the spot (bounded by `autoContextTimeoutMs`),
+anchored on the intervention itself, so a mid-turn correction arrives
+with the memories about what it corrects. A step that only carries
+plugin-injected context recalls nothing.
 Each note's row shows how long its lookup took (for example
 `recall - 12ms`) in place of the plugin name — expand the row to see the
 producer.
