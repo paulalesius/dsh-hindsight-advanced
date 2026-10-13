@@ -67,6 +67,23 @@ export interface ResolvedConfig {
    *  bank's recall may return more; the surplus is dropped before render).
    *  Default 10. */
   actionLessonCandidates: number
+  /** `true`: right after a SUCCESSFUL context compaction (the
+   *  `compaction/end` session event without an `error`), the bank is
+   *  queried for the last HUMAN message on the durable log - the same
+   *  anchor and `recallContextTurns` composition as the turn-stop
+   *  prefetch - and the snapshot is committed DIRECTLY to the surface
+   *  (row label `recall:compact - <ms>ms`): the compaction fires outside
+   *  the pre-step decision points (turn boundary, mid-step under
+   *  pressure, request retry), so there is no decision to ride. The
+   *  lookup is detached (the event is fire-and-forget) and bounded by
+   *  `autoContextTimeoutMs`; a timeout or failure discards the snapshot
+   *  silently. An identical recall commits nothing (the unchanged-marker
+   *  row under the `recallPreserve: true` default), and under
+   *  `recallPreserve: false` a refresh retires the previous full card in
+   *  place like any other snapshot. Subagent sessions are skipped.
+   *  Default `false`. Gated by `autoContext` like the other automatic
+   *  branches. */
+  recallAfterCompaction: boolean
   /** `true` (default): the model surface is append-only for the snapshots —
    *  every committed recall stays in the model context. `false`: the
    *  surface carries only the LATEST snapshot — each new one replaces the
@@ -258,6 +275,7 @@ export const Config: {
         recallAfterReasoning: boolFlag(record, 'recallAfterReasoning', false, issues),
         actionLessons: boolFlag(record, 'actionLessons', false, issues),
         actionLessonCandidates: intFlag(record, 'actionLessonCandidates', DEFAULT_ACTION_LESSON_CANDIDATES, issues),
+        recallAfterCompaction: boolFlag(record, 'recallAfterCompaction', false, issues),
         recallPreserve: boolFlag(record, 'recallPreserve', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),

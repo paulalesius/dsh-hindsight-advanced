@@ -30,6 +30,25 @@
  * recall refreshes the latest card exactly like a turn recall does, and an
  * unchanged mid-step recall commits nothing.
  *
+ * A SUCCESSFUL context compaction (the `compaction/end` session event
+ * without an `error`) recalls on its own when `recallAfterCompaction` is
+ * on (default `false`, gated by `autoContext`): the compaction fires
+ * OUTSIDE the pre-step decision points - at the turn boundary (a manual
+ * compaction), mid-step under context pressure, or on a request retry -
+ * so there is no decision to ride. The bank is queried for the last HUMAN
+ * message on the durable log (compaction shadows the surface, never the
+ * log, and the tail is never shadowed, so the anchor is always valid)
+ * and composed exactly like the turn-stop prefetch (`recallContextTurns`
+ * prior-turn lines under `Prior context:`); the snapshot is then committed
+ * DIRECTLY to the surface (row label `recall:compact - <ms>ms`) through
+ * the same `recallPreserve` machinery: an identical recall commits
+ * nothing (or the unchanged-marker row under the preserve default), and
+ * under `recallPreserve: false` a refresh retires the previous full card
+ * in place. The event is fire-and-forget: the handler returns immediately
+ * and the bounded lookup runs detached (discarded silently on timeout,
+ * abort, or failure); subagent sessions are skipped like every other
+ * automatic recall.
+ *
  * Assembly runs BEFORE the pre-step waterfall, so the memory cannot ride
  * the system prompt for its own turn; the snapshot instead rides the
  * pre-step decision, which the loop appends to the first step of each
@@ -101,7 +120,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
 import './source.ts'
@@ -130,6 +149,20 @@ declare module '@deepseek-ai/dsh-session/types' {
       shadowedSeqs: SessionSeq[]
       /** Heuristic tokens of the shadowed range under the fixed estimator. */
       shadowedTokenCount: number
+    }
+    /** Marks the end of a compaction run (the same unresolvable
+     *  `@deepseek-ai/dsh-compaction` declaration): `error` is set only on
+     *  an UNsuccessful attempt - success is `error === undefined`; `turn`
+     *  is the turn that tripped the auto pressure compaction, `null` for a
+     *  manual compaction at the turn boundary. The plugin reads only
+     *  `error`. */
+    'compaction/end': {
+      /** The compaction run's id (branded in the harness; a plain string here). */
+      compactionId: string
+      /** The auto compaction's turn; `null` for a manual compaction. */
+      turn: number | null
+      /** Set when the compaction failed; `undefined` on success. */
+      error?: string
     }
   }
 }
@@ -213,6 +246,11 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  *   on (kind-tagged row label), else passes through;
  * - `turnStopping` — starts the detached prefetch for the closing turn
  *   (only while `prefetch` is on);
+ * - `sessionEvent` - the post-compaction recall (`recallAfterCompaction`,
+ *   default off, gated by `autoContext`): on a successful `compaction/end`
+ *   the bounded lookup anchored on the log's last human message commits
+ *   the snapshot DIRECTLY to the surface (`commitSnapshotDirect` - no
+ *   decision exists at event time); subagent sessions are skipped;
  * - `disposed` — aborts and drops the session's slot.
  *
  * At most one live slot per session: created at turn-stopping, consumed or
@@ -224,7 +262,7 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
 export function buildAutoRecall(
   mount: Mount,
   ctx: Context,
-): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; disposed: (payload: DisposedPayload) => void } {
+): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; sessionEvent: (session: Session, event: SessionEvent) => void; disposed: (payload: DisposedPayload) => void } {
   const config = mount.config
   const slots = new Map<string, Slot>()
   // The lesson rows already surfaced, per session and turn: a memory id is
@@ -420,8 +458,96 @@ export function buildAutoRecall(
   }
 
   /**
+   * The post-compaction snapshot commit: the `session/event` feed has no
+   * pre-step decision to ride (the compaction fires outside the
+   * waterfall's decision points - turn boundary, mid-step, request
+   * retry), so the snapshot is committed directly to the surface,
+   * mirroring `commitSnapshot`'s surface semantics without a decision:
+   *
+   * - `recallPreserve: true` (default): append-only - an identical
+   *   recall commits the unchanged-marker row instead of a duplicate
+   *   block; an empty recall commits nothing.
+   * - `recallPreserve: false`: an identical recall commits nothing; a
+   *   refresh retires the previous full card in place (the shadow-price
+   *   `compaction/prune` pair, exactly as the decision path) and the
+   *   fresh full card is appended directly. A failed retirement degrades
+   *   to the append-only path below, so the recall still lands.
+   *
+   * Every append is try/caught: a refused commit degrades to silence -
+   * the compaction already succeeded, the surface is intact, and the
+   * next turn's recall re-injects the memory.
+   */
+  function commitSnapshotDirect(
+    session: Session,
+    hits: RecallHit[],
+    rules: DirectiveRule[],
+    durationMs: number,
+  ): void {
+    if (hits.length === 0 && rules.length === 0) return
+    const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
+    const retained = findRetainedSnapshots(session)
+    const label = `recall:compact - ${durationMs}ms`
+
+    if (!config.recallPreserve) {
+      const latest = retained[0]
+      // Identical recall: the newest full snapshot already carries this
+      // text on the surface (a tombstone never matches a rendered
+      // recall). Retiring it would be churn - it is already current.
+      if (latest !== undefined && latest.text === text) return
+      const snapshot = createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text }] },
+      })
+      try {
+        if (latest !== undefined) {
+          // Retire the previous full card in place (tombstone + shadow
+          // price, the same adjacency as the decision path), then append
+          // the fresh full card directly.
+          const seq = latest.seq
+          const price = estimateSnapshotTokens(latest.message)
+          const tombstone = renderTombstone(config.bank)
+          const marker = createUserMessage({
+            content: [{ type: 'text', text: tombstone.text }],
+            source: { kind: 'hindsight', form: 'notice', summary: boundContextSummary(tombstone.summary) },
+          })
+          if (price !== undefined) {
+            session.append('compaction/prune', {
+              shadowedRange: { start: seq, end: seq },
+              shadowedSeqs: [seq],
+              shadowedTokenCount: price,
+            })
+          }
+          session.append('user/message', marker, {
+            surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
+            sourceEventSeqs: [seq],
+          })
+        }
+        session.append('user/message', snapshot, { surfaceOp: 'append' })
+        return
+      } catch {
+        // A failed retirement degrades to the append-only path below (a
+        // half-done pair may leave an orphaned `compaction/prune`, which
+        // is harmless: its claim is dropped by the next event).
+      }
+    }
+
+    const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, rules) : text
+    const appended = createUserMessage({
+      content: [{ type: 'text', text: committed }],
+      source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text: committed }] },
+    })
+    try {
+      session.append('user/message', appended, { surfaceOp: 'append' })
+    } catch {
+      // A refused append degrades to silence: the compaction succeeded
+      // and the next turn's recall re-injects the memory.
+    }
+  }
+
+  /**
    * The bounded synchronous recall + directive pair on `query`, shared by
-   * the turn / intervention / mid-step paths: one result or no result (a
+   * the turn / intervention / mid-step / post-compaction paths: one
+   * result or no result (a
    * timeout, abort, or failure means the step proceeds without memory:
    * `null`, and the base decision passes through untouched). Both lookups
    * ride ONE bounded budget: the shared controller aborts the whole pair
@@ -637,10 +763,40 @@ export function buildAutoRecall(
     startPrefetch(session)
   }
 
+  /**
+   * The post-compaction recall (`recallAfterCompaction`, default off,
+   * gated by `autoContext`): on a SUCCESSFUL `compaction/end` (no
+   * `error`), the bank is queried for the last HUMAN message on the
+   * durable log - the same anchor the turn-stop prefetch uses, composed
+   * the same way - and the snapshot is committed DIRECTLY to the surface
+   * (`commitSnapshotDirect`: the compaction fires outside the pre-step
+   * decision points, so there is no decision to ride). The event is
+   * fire-and-forget: the handler returns immediately and the bounded
+   * lookup runs detached (its own controller, bounded by
+   * `autoContextTimeoutMs`; a timeout or failure discards the snapshot
+   * silently). Subagent sessions are skipped like every other automatic
+   * recall.
+   */
+  const sessionEvent = (session: Session, event: SessionEvent): void => {
+    if (event.type !== 'compaction/end') return
+    if (event.data.error !== undefined) return
+    if (!config.autoContext || !config.recallAfterCompaction) return
+    if (session.header?.origin === 'subagent') return
+    const latest = queryFromSession(session)
+    const query = composeRecallQuery(session, latest, config.recallContextTurns, true)
+    void syncRecall(session, query, new AbortController().signal).then(result => {
+      if (result === null) return
+      commitSnapshotDirect(session, result.hits, result.rules, result.durationMs)
+    }, () => {
+      // syncRecall resolves `null` on failure; this keeps a rejected
+      // commit from ever surfacing as an unhandled rejection.
+    })
+  }
+
   const disposed = ({ agent }: DisposedPayload): void => {
     discardSlot(agent.session.id)
     lessonSeen.delete(agent.session.id)
   }
 
-  return { preStep, turnStopping, disposed }
+  return { preStep, turnStopping, sessionEvent, disposed }
 }

@@ -165,6 +165,22 @@
  *   then the text; row label `recall:think+text - <ms>ms`), never two
  *   lookups. A steering claim always wins the precedence over either
  *   anchor.
+ * - `recallAfterCompaction`: default `false`. When on (and `autoContext`
+ *   is on), a SUCCESSFUL context compaction - the `compaction/end`
+ *   session event without an `error` - recalls on the bounded
+ *   synchronous path anchored on the durable log's last HUMAN message
+ *   (the same anchor and composition as the turn-stop prefetch: the
+ *   `recallContextTurns` prior-turn lines under `Prior context:`) and
+ *   commits the snapshot DIRECTLY to the surface - no pre-step decision
+ *   exists at event time, since the compaction fires at the turn
+ *   boundary, mid-step under pressure, or on a request retry. The row
+ *   is labeled `recall:compact - <ms>ms`; an identical recall commits
+ *   nothing (the unchanged-marker row under the `recallPreserve: true`
+ *   default), and under `recallPreserve: false` a refresh retires the
+ *   previous full card in place like any other snapshot. The lookup is
+ *   detached (the event is fire-and-forget) and bounded by
+ *   `autoContextTimeoutMs`; a timeout or failure discards the snapshot
+ *   silently. Subagent sessions are skipped.
  * - `actionLessons`: default `false`. The failure-lesson pass for a
  *   LATER step of a running turn whose claim carries no human message:
  *   the previous step's committed assistant message's TOOL-CALL blocks
@@ -281,9 +297,10 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   /** One mount: the bank's operations and its per-mount state. */
   const mount = createMount(config, buildResolveApiKey(ctx, config))
 
-  // One mount owns all three auto-recall listeners: pre-step consumes the
-  // slot, turn-stopping fills it, disposal clears it — the slot map lives
-  // in the closure they share. `ctx` is threaded for the recallPreserve
+  // One mount owns all four auto-recall listeners: pre-step consumes the
+  // slot, turn-stopping fills it, session-event recalls after a successful
+  // compaction (opt-in), and disposal clears it - the slot map lives in
+  // the closure they share. `ctx` is threaded for the recallPreserve
   // shadow price (an untyped `ctx.get('tokenMeter')` at commit time —
   // optional, so a composition without the meter degrades to an unpriced
   // replace).
@@ -291,6 +308,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
 
   ctx.on('agent/pre-step', autoRecall.preStep, { prepend: true })
   ctx.on('agent/turn-stopping', autoRecall.turnStopping)
+  ctx.on('session/event', autoRecall.sessionEvent)
   ctx.on('agent/disposed', autoRecall.disposed)
 
   ctx.tools.register(buildTool(mount))

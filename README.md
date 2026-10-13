@@ -1,5 +1,7 @@
 # dsh-plugin-hindsight-advanced
 
+<p align="center"><span style="color: red;">🔴 Compatibility: this plugin tracks DeepSeek Harness commit <code>0d1f50007f9bca3f52b06e1c3074fa14d5fb0720</code> verbatim. It is NOT compatible with later DeepSeek Harness versions - they are too buggy to use.</span></p>
+
 <p align="center"><img src="./misc/banner.jpg" alt="dsh-plugin-hindsight-advanced banner"/></p>
 
 A plugin for DeepSeek Harness (dsh) that integrates the Hindsight memory
@@ -73,7 +75,7 @@ Two things to know about the row:
 | `baseUrl` | `http://127.0.0.1:8888` | Your Hindsight server's address. |
 | `apiKeyRef` | — | **The way to give the plugin its key** — a *name* for the secret, not the secret itself. The value is looked up on every call (environment → `~/.dsh/.credentials.yaml` → `.env` files), so rotating the key needs no restart and the key never sits in a config file. See below. |
 | `apiKey` | — | A plain key in the config, instead of a reference. Prefer `apiKeyRef`. |
-| `autoContext` | `true` | Set `false` to turn off the automatic recall (each turn's first step, any human intervention claimed mid-turn, and the mid-step agent-output recall; the `hindsight` tool stays). |
+| `autoContext` | `true` | Set `false` to turn off the automatic recall (each turn's first step, any human intervention claimed mid-turn, the mid-step agent-output recall, and the post-compaction recall; the `hindsight` tool stays). |
 | `prefetch` | `true` | `true` (default): the recall starts as the *previous* turn ends, so from the second turn on it targets the previous message. `false`: every turn queries the message you just sent and waits on the server for it — the memory is always relevant to what you just said, at the cost of the server's latency on every first model call. |
 | `recallContextTurns` | `5` | How many of your recent turns ride along in the recall's query, so the bank can match memories against what the conversation was about, not just the last message. The query is the anchor message under a `Prior context:` block of the recent prior turns (one line per user/assistant message), capped at 1000 characters with the oldest lines dropped first. `1` (what the reference integrations ship) is the plain single-message query. |
 | `recallPreserve` | `true` | `true` (the default): the model context is append-only — every committed recall snapshot stays in the conversation, so later turns see the memories that were recalled earlier. `false`: the model context carries only the *latest* full snapshot — each new one retires the previous full card in place (a one-line tombstone marker stays where that turn's recall fired, its full tokens metered out of the pricing) and lands as a fresh card at its own turn, while the durable session log keeps every full snapshot for replay and audit. The naming matches llama-server's `--no-reasoning-preserve`: with it off, a turn's snapshot, like its reasoning, lives for that turn only. |
@@ -81,6 +83,7 @@ Two things to know about the row:
 | `recallAfterReasoning` | `false` | Like `recallAfterText`, but anchored on the previous step's committed **reasoning**. With both keys on, the two anchors are combined into ONE recall (the reasoning first, then the text) - never two lookups. |
 | `actionLessons` | `false` | `true`: at a step past the first whose claim carries no human message, the plugin matches the previous step's committed **tool calls** against the bank's failure lessons (its `experience` memories) and commits a collapsed notice row (no label - just its summary) listing the matches before the next model call. A previous step without tool calls anchors nothing (no bank call); each lesson shows at most once per turn; subagent sessions stay silent. |
 | `actionLessonCandidates` | `10` | How many lesson lines the `actionLessons` notice row renders - the recall is unbounded by this key, the row keeps the first matches. |
+| `recallAfterCompaction` | `false` | `true`: right after a *successful* context compaction, the plugin recalls the bank on the conversation's last human message (the same `Prior context:` composition as the prefetch) and lands the snapshot directly on the surface - the row is labeled `recall:compact - <ms>ms`. A compaction fires outside any step (at a turn boundary, mid-step under context pressure, or on a request retry), so there is no step to hang the recall on; the lookup is detached and bounded by `autoContextTimeoutMs`, and a *failed* compaction recalls nothing. Off by default. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `4096` | How much memory to bring back per recall. |
 | `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. Because the lookup runs ahead (below), most turns never pay this; a slow or stopped server never blocks the agent. |
@@ -130,6 +133,17 @@ lessons before the next model call. A previous step without tool calls
 anchors nothing (no bank call), each lesson shows at most once per
 turn, and subagent sessions stay silent. Off by default;
 `actionLessonCandidates` caps how many lesson lines the row renders.
+A fourth surface, `recallAfterCompaction` (off by default), recalls
+right after a successful context compaction: the compaction fires
+outside any step (a manual compaction at a turn boundary, the automatic
+pressure compaction mid-step, or a retry after a request overflow), so
+there is no pre-step decision to hang the snapshot on - the lookup runs
+detached on the conversation's last human message (the same
+`Prior context:` composition as the prefetch) and the snapshot lands
+directly on the surface, labeled `recall:compact - <ms>ms`. A failed
+compaction (the server reports the error) recalls nothing, subagent
+sessions stay silent, and an unchanged recall commits nothing - or the
+"no new memories" marker row, as everywhere else.
 The query is not just that one message: with the default
 `recallContextTurns: 5`, the last few turns of the conversation ride
 along under a `Prior context:` block (one line per message, capped at

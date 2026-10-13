@@ -38,7 +38,17 @@
 // bank call, a failed or too-slow job falls back to the original bounded
 // synchronous path, subagent turns never prefetch, prefetch: false gates
 // the job off (every turn queries its current message synchronously), and
-// disposal clears the slot.
+// disposal clears the slot,
+// plus the post-compaction recall (recallAfterCompaction, default off): on
+// a successful compaction/end (no error) the bank is queried for the last
+// HUMAN message on the durable log (the prefetch composition: the anchor's
+// replies as context lines) and the snapshot is committed DIRECTLY to the
+// surface (row label recall:compact) - a failed compaction (error set)
+// commits nothing, the default-off key stays silent, subagent sessions are
+// skipped, an unchanged recall commits the marker row (or nothing under
+// recallPreserve: false), and the recallPreserve: false direct commit
+// retires the previous full card in place (tombstone + adjacent shadow
+// price, fresh card appended).
 import assert from 'node:assert/strict'
 import { start, state } from './stub-server.mjs'
 
@@ -69,6 +79,7 @@ assert.deepEqual(standard.value, {
   recallContextTurns: 5,
   recallAfterText: false,
   recallAfterReasoning: false,
+  recallAfterCompaction: false,
   recallPreserve: true,
   retainAsync: false,
   maxRecallTokens: 4096,
@@ -131,6 +142,14 @@ const badMidText = validate({ bank: 'x', recallAfterText: 'yes' })
 assert.ok('issues' in badMidText && badMidText.issues.some(issue => issue.path?.[0] === 'recallAfterText'), JSON.stringify(badMidText))
 const badMidThink = validate({ bank: 'x', recallAfterReasoning: 'yes' })
 assert.ok('issues' in badMidThink && badMidThink.issues.some(issue => issue.path?.[0] === 'recallAfterReasoning'), JSON.stringify(badMidThink))
+
+// recallAfterCompaction: off by default (the post-compaction recall is
+// opt-in); opt-in + validation
+const postCompact = validate({ bank: 'x', recallAfterCompaction: true })
+assert.ok('value' in postCompact, JSON.stringify(postCompact))
+assert.equal(postCompact.value.recallAfterCompaction, true)
+const badPostCompact = validate({ bank: 'x', recallAfterCompaction: 'yes' })
+assert.ok('issues' in badPostCompact && badPostCompact.issues.some(issue => issue.path?.[0] === 'recallAfterCompaction'), JSON.stringify(badPostCompact))
 
 // bank is required
 const none = validate({})
@@ -899,8 +918,8 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   const tool = ctx.tools.registered[0]
   assert.deepEqual(
     ctx.listeners.map(entry => entry.event),
-    ['agent/pre-step', 'agent/turn-stopping', 'agent/disposed'],
-    'the mount registers pre-step (consumer), turn-stopping (producer), disposed (cleanup)',
+    ['agent/pre-step', 'agent/turn-stopping', 'session/event', 'agent/disposed'],
+    'the mount registers pre-step (consumer), turn-stopping (producer), session-event (post-compaction recall), disposed (cleanup)',
   )
   assert.deepEqual(ctx.listeners[0].options, { prepend: true })
 
@@ -1057,7 +1076,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   plugin.apply(ctx4, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-discard' })
   const preStep4 = ctx4.listeners[0].fn
   const turnStopping4 = ctx4.listeners[1].fn
-  const disposed = ctx4.listeners[2].fn
+  const disposed = ctx4.listeners[3].fn
   const carol = { session: makeSession('sess-p4', { agentPreset: 'standard' }) }
   const discardRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/prefetch-discard/memories/recall').length
   await ctx4.tools.registered[0].execute({ action: 'retain', text: 'The project uses a Postgres database.' }, { signal: baseSignal })
@@ -1630,6 +1649,137 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(lessonRows(off.session).length, 0, 'the default-off key leaves the mid-step untouched')
   assert.equal(lessonRecalls().length, beforeOff + 1, 'only the first step\'s standard recall ran')
   console.log("ok  mount M: actionLessons - the previous step's tool call anchors an experience-only lesson recall (capped, de-duplicated per turn, notice row)")
+}
+
+// ── mount N: post-compaction recall (recallAfterCompaction, off by default) ──
+{
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+  const waitFor = async (predicate, ms = 1000) => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await sleep(5)
+    }
+    return predicate()
+  }
+  const fireCompaction = (fn, session, data) => fn(session, { type: 'compaction/end', data })
+
+  // N-main: a SUCCESSFUL compaction (no error) queries the bank for the
+  // last HUMAN message on the durable log (the prefetch composition: the
+  // anchor's own turn composed in, its own line dropped) and commits the
+  // snapshot DIRECTLY to the surface, labeled recall:compact.
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'compact', prefetch: false, recallAfterCompaction: true })
+  const preStep = ctx.listeners[0].fn
+  const sessionEvent = ctx.listeners[2].fn
+  const tool = ctx.tools.registered[0]
+  const nina = { session: makeSession('sess-n1') }
+  const compactRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/compact/memories/recall')
+  await tool.execute({ action: 'retain', text: 'The deploy target is the staging cluster.' }, { signal: baseSignal })
+
+  await runStep(preStep, nina, 1, [userMsg('where do we deploy')])
+  assert.equal(snapshots(nina.session).length, 1, 'the turn-1 snapshot lands (synchronous path)')
+  assert.equal(compactRecalls().length, 1, 'turn 1 is one recall')
+  assert.equal(compactRecalls().at(-1).body.query, 'where do we deploy', 'the turn-1 query is the current message (no prior turns yet)')
+
+  // The turn closes; a manual compaction succeeds at the turn boundary.
+  asstStep(nina.session, 1, 1, [textBlock('Staging: the deploy target is the staging cluster.')])
+  assert.equal(
+    fireCompaction(sessionEvent, nina.session, { compactionId: 'c-n1', turn: null }),
+    undefined,
+    'the session/event listener returns immediately (fire-and-forget)',
+  )
+  assert.ok(await waitFor(() => compactRecalls().length === 2), 'the successful compaction issued its recall')
+  assert.equal(
+    compactRecalls().at(-1).body.query,
+    'Prior context:\n\nassistant: Staging: the deploy target is the staging cluster.\n\nwhere do we deploy',
+    'the anchor is the log\'s last human message; its assistant reply composes as context',
+  )
+  assert.ok(await waitFor(() => snapshots(nina.session).length === 2), 'the snapshot is committed directly on the surface')
+  const compactSnap = snapshots(nina.session)[1]
+  assert.match(compactSnap.data.source.sections[0].name, /^recall:compact - \d+ms$/, 'the post-compaction row is labeled recall:compact')
+  assert.ok(onSurface(nina.session, compactSnap), 'the direct commit lands on the model surface')
+
+  // A second successful compaction recalls the same memory: under the
+  // recallPreserve: true default the marker row commits instead of a
+  // duplicate block.
+  fireCompaction(sessionEvent, nina.session, { compactionId: 'c-n2', turn: null })
+  assert.ok(await waitFor(() => snapshots(nina.session).length === 3), 'the unchanged recall commits its marker row')
+  assert.match(snapshots(nina.session)[2].data.content[0].text, /still in effect/, 'the marker names the memories still in effect')
+  console.log('ok  mount N: a successful compaction commits the recall:compact snapshot directly (log-anchored, prefetch composition)')
+
+  // N-fail: a FAILED compaction (error set) commits nothing.
+  const before = state.requests.length
+  fireCompaction(sessionEvent, nina.session, { compactionId: 'c-n3', turn: 2, error: 'compaction failed' })
+  await sleep(50)
+  assert.equal(state.requests.length, before, 'a failed compaction issues no recall')
+  assert.equal(snapshots(nina.session).length, 3, 'a failed compaction commits nothing')
+  console.log('ok  mount N: a failed compaction (error set) commits nothing')
+
+  // N-off: with the key at its default (off), a successful compaction
+  // stays silent.
+  const ctxOff = makeCtx()
+  plugin.apply(ctxOff, { ...standard.value, baseUrl: stubUrl, bank: 'compact', prefetch: false })
+  const ninaOff = { session: makeSession('sess-n4') }
+  await runStep(ctxOff.listeners[0].fn, ninaOff, 1, [userMsg('where do we deploy')])
+  const offBefore = state.requests.length
+  fireCompaction(ctxOff.listeners[2].fn, ninaOff.session, { compactionId: 'c-n5', turn: null })
+  await sleep(50)
+  assert.equal(state.requests.length, offBefore, 'default-off: a compaction issues no recall')
+  assert.equal(snapshots(ninaOff.session).length, 1, 'default-off: no post-compaction snapshot')
+  console.log('ok  mount N: recallAfterCompaction is off by default')
+
+  // N-sub: subagent sessions are skipped.
+  const ninaSub = { session: makeSession('sess-n6', { origin: 'subagent' }) }
+  fireCompaction(sessionEvent, ninaSub.session, { compactionId: 'c-n6', turn: null })
+  await sleep(50)
+  assert.equal(snapshots(ninaSub.session).length, 0, 'subagent sessions are skipped')
+  console.log('ok  mount N: subagent sessions stay silent after compaction')
+
+  // N-keep: recallPreserve: false - the direct commit retires the
+  // previous full card in place (tombstone + adjacent shadow price) and
+  // appends the fresh full card; an identical recall commits nothing.
+  const ctxKeep = makeCtx({ tokenMeter: { estimateMessage: () => 7 } })
+  plugin.apply(ctxKeep, { ...standard.value, baseUrl: stubUrl, bank: 'compact-nokeep', prefetch: false, recallAfterCompaction: true, recallPreserve: false })
+  const keepPreStep = ctxKeep.listeners[0].fn
+  const keepEvents = ctxKeep.listeners[2].fn
+  const keepTool = ctxKeep.tools.registered[0]
+  const otto = { session: makeSession('sess-n5') }
+  const keepRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/compact-nokeep/memories/recall')
+  await keepTool.execute({ action: 'retain', text: 'The lint config forbids var declarations.' }, { signal: baseSignal })
+
+  await runStep(keepPreStep, otto, 1, [userMsg('check the lint config')])
+  const firstKeep = snapshots(otto.session)[0]
+  assert.ok(onSurface(otto.session, firstKeep), 'the first snapshot is committed directly (no prior card to retire)')
+
+  // The bank gains a memory between the turn recall and the compaction,
+  // so the refresh recalls DIFFERENT text (the stub ignores the query:
+  // without a state change the refresh would be identical and a no-op).
+  await keepTool.execute({ action: 'retain', text: 'The lint config also caps line length at 120.' }, { signal: baseSignal })
+  asstStep(otto.session, 1, 1, [textBlock('Reading the config for var declarations.')])
+  fireCompaction(keepEvents, otto.session, { compactionId: 'c-n7', turn: null })
+  assert.ok(await waitFor(() => snapshots(otto.session).length === 2), 'the refresh commits the fresh card')
+  const secondKeep = snapshots(otto.session)[1]
+  assert.match(secondKeep.data.source.sections[0].name, /^recall:compact - \d+ms$/)
+  assert.ok(!onSurface(otto.session, firstKeep), 'the old full card is retired')
+  assert.ok(onSurface(otto.session, secondKeep), 'the fresh full card is on the surface')
+  const tombstone = otto.session.events.find(event =>
+    event.type === 'user/message' && event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice',
+  )
+  assert.ok(tombstone, 'the retired slot holds a tombstone notice')
+  assert.ok(onSurface(otto.session, tombstone), 'the tombstone is on the surface in the old slot')
+  const prune = otto.session.events.find(event => event.type === 'compaction/prune')
+  assert.ok(prune, 'the shadow price is recorded')
+  assert.equal(otto.session.events.indexOf(prune), otto.session.events.indexOf(tombstone) - 1, 'the prune is adjacent (immediately before) the replace')
+  assert.deepEqual(prune.data.shadowedSeqs, [firstKeep.seq], 'the prune prices the retired card')
+
+  // A second successful compaction recalls the same memory: the newest
+  // full card already carries that text, so nothing is committed.
+  fireCompaction(keepEvents, otto.session, { compactionId: 'c-n8', turn: null })
+  await sleep(50)
+  assert.equal(snapshots(otto.session).length, 2, 'an identical refresh commits nothing (no churn)')
+  assert.equal(keepRecalls().length, 3, 'the lookup still ran on the identical refresh (turn recall, refresh, identical)')
+  console.log('ok  mount N: recallPreserve: false retires the previous full card in place on the direct commit (tombstone + shadow price)')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

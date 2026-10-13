@@ -84,6 +84,18 @@
         # recall is unbounded by this key; the row keeps the first N).
         # actionLessonCandidates: 10
 
+        # false - off. true - right after a SUCCESSFUL context compaction
+        # the bank is queried for the conversation's last human message
+        # (the same composition as the prefetch: recallContextTurns
+        # lines under `Prior context:`) and the snapshot lands on the
+        # surface directly (row label `recall:compact - <ms>ms`): a
+        # compaction fires outside any step (turn boundary, mid-step
+        # under pressure, request retry), so there is no step to hang
+        # the recall on. A failed compaction (an error) recalls nothing;
+        # subagent sessions stay silent; the lookup is detached and
+        # bounded by autoContextTimeoutMs.
+        # recallAfterCompaction: false
+
         # true — the model surface is append-only: every committed recall
         # snapshot stays in the model context. false — the surface carries
         # only the LATEST full snapshot: each new one retires the
