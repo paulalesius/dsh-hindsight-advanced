@@ -55,7 +55,7 @@ export interface ResolvedConfig {
   /** `true`: at a LATER step of a running turn, the previous step's
    *  committed tool calls are matched against the bank's `experience`-type
    *  memories (past failure lessons) and the best matches are committed as
-   *  a `form: 'notice'` row labeled `lesson:<tool> - <ms>ms`. The branch
+   *  a `form: 'notice'` row (no label - just its summary). The branch
    *  runs only when the mid-step anchor branch (the `recallAfterText` /
    *  `recallAfterReasoning` keys) did not attempt a recall of its own: one
    *  bounded recall pass per step. A steering claim wins the precedence

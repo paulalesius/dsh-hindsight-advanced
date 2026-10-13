@@ -231,8 +231,7 @@ const baseSignal = new AbortController().signal
 const userMsg = (text) => ({ id: `u${Math.random()}`, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
 const isSnapshot = (event) =>
   event.type === 'user/message'
-  && event.data.source?.kind === 'plugin'
-  && event.data.source.plugin === 'hindsight-advanced'
+  && event.data.source?.kind === 'hindsight'
   && event.data.source.form === 'snapshot'
 const snapshots = (session) => session.events.filter(isSnapshot)
 const onSurface = (session, event) => session.surface.nodes.includes(event.seq)
@@ -243,7 +242,7 @@ const deriveMessages = (session) => session.surface.nodes
   .map(seq => session.events[seq - 1])
   .map(event => event.data)
 const derivedSnapshots = (session) => deriveMessages(session).filter(message =>
-  message.source?.kind === 'plugin' && message.source.plugin === 'hindsight-advanced' && message.source.form === 'snapshot',
+  message.source?.kind === 'hindsight' && message.source.form === 'snapshot',
 )
 
 // Run one pre-step the way the loop does: the loop appends the decision's
@@ -426,8 +425,8 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(snaps1[0].seq, agent.session.events.at(-2).seq + 1, 'the row lands right after the triggering message')
   assert.match(snaps1[0].data.content[0].text, /Relevant memories from the Hindsight bank "hermes"/)
   assert.match(snaps1[0].data.content[0].text, /prefers tabs over spaces/)
-  assert.match(snaps1[0].data.source.label, /^recall - \d+ms$/, 'the row label is the lookup wall clock, e.g. "recall - 3ms"')
-  assert.equal(snaps1[0].data.source.plugin, 'hindsight-advanced', 'the plugin stays the attribution identity beside the label')
+  assert.match(snaps1[0].data.source.sections[0].name, /^recall - \d+ms$/, 'the section name is the lookup wall clock, e.g. "recall - 3ms"')
+  assert.equal(snaps1[0].data.source.kind, 'hindsight', 'the hindsight kind is the attribution identity')
   const autoReq = state.requests.filter(request =>
     request.path === '/v1/default/banks/hermes/memories/recall'
     && request.body.query === 'which editor does the user prefer?',
@@ -483,8 +482,8 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   const d4 = await runStep(listener, agent, 2, [userMsg('wait, the demo build must run on Node 22')])
   assert.equal(d4.messages.length, 2, 'the intervention snapshot rides the step decision')
   assert.match(d4.messages.at(-1).content[0].text, /Node 22/, 'the intervention recall names the matched memory')
-  assert.match(d4.messages.at(-1).source.label, /^recall - \d+ms$/, 'the intervention row carries the same label')
-  assert.equal(d4.messages.at(-1).source.plugin, 'hindsight-advanced', 'the plugin stays the attribution identity')
+  assert.match(d4.messages.at(-1).source.sections[0].name, /^recall - \d+ms$/, 'the intervention row carries the same section name')
+  assert.equal(d4.messages.at(-1).source.kind, 'hindsight', 'the hindsight kind is the attribution identity')
   const interventionReq = state.requests.filter(request =>
     request.path === '/v1/default/banks/hermes/memories/recall'
     && request.body.query === 'wait, the demo build must run on Node 22',
@@ -494,7 +493,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(afterIntervention, afterMarker + 1, 'the intervention commits its snapshot')
   // A step-2 claim WITHOUT a human message (plugin-injected context alone)
   // is not an intent: no recall, no snapshot.
-  const injectedContext = { id: `inj${Math.random()}`, role: 'user', content: [{ type: 'text', text: 'injected plugin context' }], source: { kind: 'plugin', plugin: 'other-plugin', form: 'notice' } }
+  const injectedContext = { id: `inj${Math.random()}`, role: 'user', content: [{ type: 'text', text: 'injected plugin context' }], source: { kind: 'other-plugin', form: 'notice' } }
   const d4b = await runStep(listener, agent, 2, [injectedContext])
   assert.equal(d4b.messages.length, 1, 'a non-human step-2 claim rides no snapshot')
   assert.equal(snapshots(agent.session).length, afterIntervention, 'no recall for a plugin-context claim')
@@ -956,7 +955,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   const second = snapshots(alice.session).at(-1)
   assert.ok(second, 'turn 2 commits a snapshot from the cache')
   assert.match(second.data.content[0].text, /managed Postgres/, 'the cached snapshot carries the job\'s view of the bank')
-  assert.match(second.data.source.label, /^recall - \d+ms$/, 'the cached snapshot carries the job wall clock as its row label')
+  assert.match(second.data.source.sections[0].name, /^recall - \d+ms$/, 'the cached snapshot carries the job wall clock as its section name')
   state.recallDelayMs = 0
 
   // An unchanged cached recall commits no duplicate block (no churn): the
@@ -1234,14 +1233,14 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(newSnap.surfaceOp, 'append', 'the fresh card is a plain append at its own turn')
   assert.match(newSnap.data.content[0].text, /compiles with strict pnpm/)
   assert.equal(kate.session.surface.nodes[kate.session.surface.nodes.length - 1], newSnap.seq, 'the fresh card lands AFTER the triggering message')
-  const tombstones = kate.session.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin' && event.data.source.form === 'notice')
+  const tombstones = kate.session.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice')
   assert.equal(tombstones.length, 1, 'one tombstone for one retirement')
   const tomb = tombstones[0]
   assert.deepEqual(tomb.surfaceOp, { op: 'replace', startSeq: oldSnap.seq, endSeq: oldSnap.seq }, 'the tombstone takes the old card\'s slot')
   assert.deepEqual(tomb.sourceEventSeqs, [oldSnap.seq], 'the replace cites the shadowed node')
   assert.ok(onSurface(kate.session, tomb))
   assert.equal(kate.session.surface.nodes[0], tomb.seq, 'the tombstone sits in place — before both messages, at the turn that recalled')
-  assert.equal(tomb.data.source.plugin, 'hindsight-advanced')
+  assert.equal(tomb.data.source.kind, 'hindsight')
   assert.match(tomb.data.content[0].text, /preserve-off/, 'the tombstone names the bank')
   assert.match(tomb.data.content[0].text, /refreshed/)
   assert.ok(typeof tomb.data.source.summary === 'string' && tomb.data.source.summary.length > 0 && tomb.data.source.summary.length <= 120, 'the collapsed row\'s one-line account, bounded')
@@ -1263,7 +1262,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   const d3 = await runStep(listener, kate, 1, [userMsg('how does kbuild compile?')])
   assert.equal(d3.messages.length, 1, 'no duplicate card, no dangling tombstone')
   assert.equal(snapshots(kate.session).length, 2, 'an unchanged recall commits nothing in replace mode')
-  assert.equal(kate.session.events.filter(event => event.data.source?.kind === 'plugin' && event.data.source.form === 'notice').length, 1, 'no second tombstone either')
+  assert.equal(kate.session.events.filter(event => event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice').length, 1, 'no second tombstone either')
   assert.equal(kate.session.events.filter(event => event.type === 'compaction/prune').length, 1, 'no second price either')
   assert.equal(kate.session.surface.nodes.length, 5, 'only the turn\'s message was appended')
   assert.equal(kate.session.surface.nodes[0], tomb.seq, 'the tombstone stays in place')
@@ -1294,7 +1293,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.ok(onSurface(flaky, denSnaps2[0]), 'the old full card stays')
   assert.ok(onSurface(flaky, denSnaps2[1]), 'the degraded fresh card is appended, both on the surface')
   assert.equal(denSnaps2[1].surfaceOp, 'append')
-  assert.equal(flaky.events.filter(event => event.data.source?.kind === 'plugin' && event.data.source.form === 'notice').length, 0, 'no tombstone when the replace is refused')
+  assert.equal(flaky.events.filter(event => event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice').length, 0, 'no tombstone when the replace is refused')
   assert.equal(flaky.events.filter(event => event.type === 'compaction/prune').length, 1, 'the orphaned price stays in the log (harmless)')
   assert.equal(flaky.surface.nodes.length, 4, 'old card, message, fresh card, message')
   console.log('ok  mount K: a refused retirement degrades to the append path (turn never breaks, orphaned price harmless)')
@@ -1318,7 +1317,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(d1.kind, 'enter')
   assert.equal(d1.messages.length, 2, 'turn 1 (step 1) recalls synchronously; the snapshot rides the decision')
   assert.equal(snapshots(lynn.session).length, 1)
-  assert.match(snapshots(lynn.session)[0].data.source.label, /^recall - \d+ms$/, 'the turn-1 row keeps the plain label')
+  assert.match(snapshots(lynn.session)[0].data.source.sections[0].name, /^recall - \d+ms$/, 'the turn-1 row keeps the plain section name')
 
   // Step 1 commits thinking, visible text, and a tool call.
   asstStep(lynn.session, 1, 1, [
@@ -1333,8 +1332,8 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(d2.messages.length, 1, 'the claim was empty; only the mid-step snapshot rides the decision')
   const snaps2 = snapshots(lynn.session)
   assert.equal(snaps2.length, 2)
-  assert.match(snaps2[1].data.source.label, /^recall:text - \d+ms$/, 'the mid-step row is labeled by the anchor kind')
-  assert.equal(snaps2[1].data.source.plugin, 'hindsight-advanced', 'the plugin stays the attribution identity')
+  assert.match(snaps2[1].data.source.sections[0].name, /^recall:text - \d+ms$/, 'the mid-step row is named by the anchor kind')
+  assert.equal(snaps2[1].data.source.kind, 'hindsight', 'the hindsight kind is the attribution identity')
   assert.equal(midstepRecalls().length, 2, 'exactly one new recall for the mid-step')
   assert.equal(
     midstepRecalls().at(-1).body.query,
@@ -1356,7 +1355,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(d4.messages.length, 2, 'the steer claim plus the intervention snapshot ride the decision')
   const snaps4 = snapshots(lynn.session)
   assert.equal(snaps4.length, 3)
-  assert.match(snaps4[2].data.source.label, /^recall - \d+ms$/, 'the intervention row keeps the plain label')
+  assert.match(snaps4[2].data.source.sections[0].name, /^recall - \d+ms$/, 'the intervention row keeps the plain section name')
   assert.equal(
     midstepRecalls().at(-1).body.query,
     'Prior context:\n\nuser: check the lint config\nassistant: Reading the lint config to check for var declarations.\n\nstop, the lint check must cover the docs folder too',
@@ -1387,7 +1386,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(e2.messages.length, 1)
   const snapsE = snapshots(marge.session)
   assert.equal(snapsE.length, 2)
-  assert.match(snapsE[1].data.source.label, /^recall:think - \d+ms$/, 'the reasoning anchor is labeled recall:think')
+  assert.match(snapsE[1].data.source.sections[0].name, /^recall:think - \d+ms$/, 'the reasoning anchor is named recall:think')
   assert.equal(
     midstep2Recalls().at(-1).body.query,
     'Prior context:\n\nuser: why does CI rebuild the cache\n\nThe CI cache key is the commit hash plus the lockfile, so a new commit rebuilds it.',
@@ -1419,7 +1418,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(f2.messages.length, 1)
   const snapsF = snapshots(nora.session)
   assert.equal(snapsF.length, 2)
-  assert.match(snapsF[1].data.source.label, /^recall:think\+text - \d+ms$/, 'both kinds compose one anchor, labeled recall:think+text')
+  assert.match(snapsF[1].data.source.sections[0].name, /^recall:think\+text - \d+ms$/, 'both kinds compose one anchor, named recall:think+text')
   assert.equal(midstep3Recalls().length, 2, 'ONE recall for the composed anchor, never two lookups')
   assert.equal(
     midstep3Recalls().at(-1).body.query,
@@ -1482,11 +1481,11 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(snapsH2.length, 2, 'the durable log keeps both full snapshots')
   const oldCard = snapsH2[0]
   const newCard = snapsH2[1]
-  assert.match(newCard.data.source.label, /^recall:text - \d+ms$/, 'the mid-step card is labeled by the anchor kind')
+  assert.match(newCard.data.source.sections[0].name, /^recall:text - \d+ms$/, 'the mid-step card is named by the anchor kind')
   assert.ok(!onSurface(pete.session, oldCard), 'the old full card is retired from the surface')
   assert.ok(onSurface(pete.session, newCard), 'the fresh full card is on the surface')
   assert.equal(pete.session.surface.nodes[pete.session.surface.nodes.length - 1], newCard.seq, 'the fresh card lands after the triggering message')
-  const tombs = pete.session.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'plugin' && event.data.source.form === 'notice')
+  const tombs = pete.session.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice')
   assert.equal(tombs.length, 1, 'one tombstone for one retirement')
   const tomb = tombs[0]
   assert.deepEqual(tomb.surfaceOp, { op: 'replace', startSeq: oldCard.seq, endSeq: oldCard.seq }, 'the tombstone takes the old card\'s slot')
@@ -1511,7 +1510,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   const h3 = await runStepAt(listener5, pete, 1, 3, [])
   assert.equal(h3.messages.length, 0, 'an unchanged mid-step recall commits nothing')
   assert.equal(snapshots(pete.session).length, 2, 'still both full snapshots in the durable log')
-  assert.equal(pete.session.events.filter(event => event.data.source?.kind === 'plugin' && event.data.source.form === 'notice').length, 1, 'no second tombstone')
+  assert.equal(pete.session.events.filter(event => event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice').length, 1, 'no second tombstone')
   assert.equal(pete.session.events.filter(event => event.type === 'compaction/prune').length, 1, 'no second price')
   assert.equal(midstep4Recalls().length, 3, 'the lookup still ran (deterministic stub); nothing was committed')
   console.log('ok  mount L: recallPreserve false retires the previous card for a mid-step snapshot (tombstone, shadow price); unchanged = no-op')
@@ -1528,8 +1527,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   const lessonRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/lessons/memories/recall')
   const lessonRows = session => session.events.filter(event =>
     event.type === 'user/message'
-    && event.data.source?.kind === 'plugin'
-    && event.data.source.plugin === 'hindsight-advanced'
+    && event.data.source?.kind === 'hindsight'
     && event.data.source.form === 'notice',
   )
   const bashCall = (id, command) => ({ id, type: 'tool-call', name: 'bash', arguments: JSON.stringify({ command }) })
@@ -1557,7 +1555,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   await runStepAt(listener, max, 1, 2, [])
   let rows = lessonRows(max.session)
   assert.equal(rows.length, 1, 'one lesson row for the action step')
-  assert.match(rows[0].data.source.label, /^lesson:bash - \d+ms$/)
+  assert.equal(rows[0].data.source.form, 'notice', 'the lesson row is a plain notice (no label, just a summary)')
   const capBody = rows[0].data.content[0].text
   assert.ok(capBody.includes("matching the previous step's bash action:"))
   assert.equal(capBody.split('\n').filter(line => line.startsWith('- ')).length, 10, 'the render cap keeps the first 10 of 12 hits')

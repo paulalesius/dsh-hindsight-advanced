@@ -74,7 +74,7 @@
         # running turn whose claim carries no human message matches the
         # previous step's committed TOOL CALLS against the bank'
         # experience-type memories (failure lessons); a match commits a
-        # collapsed notice row (labeled `lesson:<tool> - <ms>ms`) listing
+        # collapsed notice row (no label - just its summary) listing
         # up to actionLessonCandidates lessons, de-duplicated per turn by
         # memory id. A previous step without tool calls anchors nothing
         # (no bank call); subagent sessions stay silent.

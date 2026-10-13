@@ -157,7 +157,7 @@ tree — preserve them when you change anything:
    DIRECTLY through `session.append` - never riding the pre-step
    decision - so the snapshot/unchanged machinery and
    `findRetainedSnapshots` never see it and `recallPreserve` cannot
-   retire it; the row is labeled `lesson:<tool> - <ms>ms` and lists up
+   retire it; the row carries no label (a `kind: 'hindsight'` notice with only its summary) and lists up
    to `actionLessonCandidates` (default `10`) lesson lines (240 chars
    each, with the match score and the memory's id). The per-turn dedupe
    (by memory id, keyed by session) keeps a repeated match quiet while
@@ -200,8 +200,7 @@ nothing committed), the thirteenth the failure-lesson pass
 previous step's committed TOOL CALLS (tool-call lines `bash:
 <command>` / `name key=value`, the query capped at 500 chars),
 experience-only (a world seed filtered out, budget low, 512-token
-bound), the match committing a `form: 'notice'` row directly (labeled
-`lesson:<tool>`, each line capped at 240 chars with its match score and
+bound), the match committing a `form: 'notice'` row directly (no label, just its summary; each line capped at 240 chars with its match score and
 memory id), up to `actionLessonCandidates` lines, per-turn dedupe by
 memory id (the lookup still runs; nothing re-commits; the turn reset
 re-surfaces), a text-only previous step anchoring nothing (no bank

@@ -173,7 +173,7 @@
  *   restricted to the bank's `experience`-type memories (the failure
  *   lessons). A match commits a `form: 'notice'` row directly (never
  *   riding the pre-step decision, so the snapshot/unchanged machinery
- *   never sees it), labeled `lesson:<tool> - <ms>ms`, listing up to
+ *   never sees it), a `kind: 'hindsight'` notice with only its summary, listing up to
  *   `actionLessonCandidates` lesson lines (240 chars each, with the
  *   match score and the memory's id). Lessons already shown this turn
  *   are de-duplicated by memory id (the lookup still runs; a repeated
@@ -287,7 +287,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   // shadow price (an untyped `ctx.get('tokenMeter')` at commit time —
   // optional, so a composition without the meter degrades to an unpriced
   // replace).
-  const autoRecall = buildAutoRecall(mount, name, ctx)
+  const autoRecall = buildAutoRecall(mount, ctx)
 
   ctx.on('agent/pre-step', autoRecall.preStep, { prepend: true })
   ctx.on('agent/turn-stopping', autoRecall.turnStopping)

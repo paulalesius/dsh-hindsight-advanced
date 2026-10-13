@@ -79,7 +79,7 @@ Two things to know about the row:
 | `recallPreserve` | `true` | `true` (the default): the model context is append-only — every committed recall snapshot stays in the conversation, so later turns see the memories that were recalled earlier. `false`: the model context carries only the *latest* full snapshot — each new one retires the previous full card in place (a one-line tombstone marker stays where that turn's recall fired, its full tokens metered out of the pricing) and lands as a fresh card at its own turn, while the durable session log keeps every full snapshot for replay and audit. The naming matches llama-server's `--no-reasoning-preserve`: with it off, a turn's snapshot, like its reasoning, lives for that turn only. |
 | `recallAfterText` | `false` | `true`: a step past the first whose claim carries no human message recalls the bank anchored on the previous step's committed **text** - the words the agent wrote. Bounded by `autoContextTimeoutMs`, at most one recall per step; a human message in the claim takes the intervention path instead. |
 | `recallAfterReasoning` | `false` | Like `recallAfterText`, but anchored on the previous step's committed **reasoning**. With both keys on, the two anchors are combined into ONE recall (the reasoning first, then the text) - never two lookups. |
-| `actionLessons` | `false` | `true`: at a step past the first whose claim carries no human message, the plugin matches the previous step's committed **tool calls** against the bank's failure lessons (its `experience` memories) and commits a collapsed notice row (labeled `lesson:<tool> - 12ms`) listing the matches before the next model call. A previous step without tool calls anchors nothing (no bank call); each lesson shows at most once per turn; subagent sessions stay silent. |
+| `actionLessons` | `false` | `true`: at a step past the first whose claim carries no human message, the plugin matches the previous step's committed **tool calls** against the bank's failure lessons (its `experience` memories) and commits a collapsed notice row (no label - just its summary) listing the matches before the next model call. A previous step without tool calls anchors nothing (no bank call); each lesson shows at most once per turn; subagent sessions stay silent. |
 | `actionLessonCandidates` | `10` | How many lesson lines the `actionLessons` notice row renders - the recall is unbounded by this key, the row keeps the first matches. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `4096` | How much memory to bring back per recall. |
@@ -125,7 +125,7 @@ agent's ACTIONS instead of its words: at a step past the first whose
 claim carries no human message, the plugin matches the previous step's
 committed tool calls (one line per call) against the bank's failure
 lessons - its `experience` memories - and a match commits a collapsed
-notice row (labeled `lesson:<tool> - 12ms`) listing the matching
+notice row (no label - just its summary) listing the matching
 lessons before the next model call. A previous step without tool calls
 anchors nothing (no bank call), each lesson shows at most once per
 turn, and subagent sessions stay silent. Off by default;

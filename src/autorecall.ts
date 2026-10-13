@@ -1,7 +1,7 @@
 /**
  * The automatic per-turn recall: on the first step of each turn the latest
  * user message is queried — and the bank's active standing directives are
- * listed — and both become a plugin-sourced snapshot message (the same
+ * listed — and both become a snapshot message under the `hindsight` producer kind (the same
  * pattern `time-context` uses for the clock). Rules are rendered in their
  * own section, so a stored rule reaches the model every turn even when the
  * recall matches nothing.
@@ -35,10 +35,10 @@
  * pre-step decision, which the loop appends to the first step of each
  * turn right after the message that triggered the recall — so the
  * context row lands in the transcript below that message, newest at the
- * bottom, and never above it. Each snapshot's source carries a
- * per-message `label` (`recall - <ms>ms`, the lookup's wall clock) that
- * the collapsed context row displays in place of the plugin name; the
- * `plugin` field stays the attribution identity.
+ * bottom, and never above it. Each snapshot's source carries a single
+ * section named with the row label (`recall - <ms>ms`, the lookup's wall
+ * clock) that the collapsed context row displays in place of the plugin
+ * name; the `hindsight` kind stays the attribution identity.
  *
  * The lookup is bounded: a stopped or slow server costs at most
  * `autoContextTimeoutMs` and the turn proceeds without memory. To keep a
@@ -104,6 +104,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 
 import type { Mount } from './bank.ts'
+import './source.ts'
 import { composeRecallQuery, findRetainedSnapshots, lessonAnchor, midStepAnchor, previousStepAssistant, queryFromHumanMessages, queryFromMessages, queryFromSession, renderLesson, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
 import type { MidStepKind } from './snapshot.ts'
 import type { DirectiveRule, LessonHit, RecallHit } from './types.ts'
@@ -222,7 +223,6 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  */
 export function buildAutoRecall(
   mount: Mount,
-  pluginName: string,
   ctx: Context,
 ): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; disposed: (payload: DisposedPayload) => void } {
   const config = mount.config
@@ -338,7 +338,7 @@ export function buildAutoRecall(
     if (decision.kind !== 'enter') return decision
     if (hits.length === 0 && rules.length === 0) return decision
     const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
-    const retained = findRetainedSnapshots(session, pluginName)
+    const retained = findRetainedSnapshots(session)
     const label = kind === undefined ? `recall - ${durationMs}ms` : `recall:${kind} - ${durationMs}ms`
 
     if (!config.recallPreserve) {
@@ -350,7 +350,7 @@ export function buildAutoRecall(
       if (latest !== undefined && latest.text === text) return decision
       const snapshot = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label, sections: [{ name: pluginName, text }] },
+        source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text }] },
       })
       try {
         if (latest !== undefined) {
@@ -374,7 +374,7 @@ export function buildAutoRecall(
           const tombstone = renderTombstone(config.bank)
           const marker = createUserMessage({
             content: [{ type: 'text', text: tombstone.text }],
-            source: { kind: 'plugin', plugin: pluginName, form: 'notice', summary: boundContextSummary(tombstone.summary) },
+            source: { kind: 'hindsight', form: 'notice', summary: boundContextSummary(tombstone.summary) },
           })
           if (price !== undefined) {
             session.append('compaction/prune', {
@@ -414,7 +414,7 @@ export function buildAutoRecall(
     const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, rules) : text
     const appended = createUserMessage({
       content: [{ type: 'text', text: committed }],
-      source: { kind: 'plugin', plugin: pluginName, form: 'snapshot', label, sections: [{ name: pluginName, text: committed }] },
+      source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text: committed }] },
     })
     return { kind: 'enter', messages: [...decision.messages, appended] }
   }
@@ -502,16 +502,14 @@ export function buildAutoRecall(
    * triggering message, and the lesson belongs to the PREVIOUS step's action).
    * A refused append degrades to the untouched decision: the step proceeds.
    */
-  function commitLesson(decision: PreStepDecision, session: Session, rendered: { text: string; summary: string }, tool: string, durationMs: number): PreStepDecision {
+  function commitLesson(decision: PreStepDecision, session: Session, rendered: { text: string; summary: string }): PreStepDecision {
     if (decision.kind !== 'enter') return decision
     const message = createUserMessage({
       content: [{ type: 'text', text: rendered.text }],
       source: {
-        kind: 'plugin',
-        plugin: pluginName,
+        kind: 'hindsight',
         form: 'notice',
         summary: boundContextSummary(rendered.summary),
-        label: `lesson:${tool} - ${durationMs}ms`,
       },
     })
     try {
@@ -580,12 +578,11 @@ export function buildAutoRecall(
         if (previous !== undefined) {
           const anchored = lessonAnchor(previous.message)
           if (anchored !== null) {
-            const startedAt = Date.now()
             const hits = await lessonLookup(session, anchored.query, signal)
             if (hits !== null) {
               const fresh = hits.filter(hit => !lessonAlreadySeen(session, turn, hit.id))
               if (fresh.length > 0) {
-                return commitLesson(decision, session, renderLesson(config.bank, anchored.tool, fresh.slice(0, config.actionLessonCandidates)), anchored.tool, Date.now() - startedAt)
+                return commitLesson(decision, session, renderLesson(config.bank, anchored.tool, fresh.slice(0, config.actionLessonCandidates)))
               }
             }
           }
@@ -622,7 +619,7 @@ export function buildAutoRecall(
     const query = composeRecallQuery(session, latest, config.recallContextTurns, false)
     // The bounded synchronous path (shared with the mid-step branch above):
     // a timed-out, aborted, or failed pair returns without a snapshot, so a
-    // committed label is always real bank latency.
+    // committed section name is always real bank latency.
     const result = await syncRecall(session, query, signal)
     if (result === null) return decision
     return commitSnapshot(decision, session, result.hits, result.rules, result.durationMs)

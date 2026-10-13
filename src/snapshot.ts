@@ -495,16 +495,16 @@ function snapshotText(message: UserMessage): string {
 }
 
 /**
- * `session`'s plugin snapshot messages (sourced by `pluginName`) still on
+ * `session`'s hindsight snapshot messages still on
  * the model-visible surface (not shadowed by compaction), newest first.
  * Scans the durable log from the end. The caller compares the rendered
  * recall against EVERY one of them — not just the newest — because a
  * snapshot two turns back is still on the surface, and re-committing it
- * would be churn too (the unchanged-recall marker row is a plugin
+ * would be churn too (the unchanged-recall marker row is a hindsight
  * snapshot message as well, but its text never equals a rendered recall,
  * so it can never trigger the comparison).
  */
-export function findRetainedSnapshots(session: Session, pluginName: string): { seq: SessionSeq; text: string; message: UserMessage }[] {
+export function findRetainedSnapshots(session: Session): { seq: SessionSeq; text: string; message: UserMessage }[] {
   const onSurface = new Set(session.surface.nodes)
   const events = session.snapshotEvents()
   const retained: { seq: SessionSeq; text: string; message: UserMessage }[] = []
@@ -514,11 +514,11 @@ export function findRetainedSnapshots(session: Session, pluginName: string): { s
     const source = event.data.source
     // Only FULL snapshot cards are retained: the tombstone a
     // `recallPreserve: false` surface installs in place of a retired card
-    // is a plugin message of this same bank, but its `form: 'notice'`
+    // is a hindsight message of this same bank, but its `form: 'notice'`
     // marks it as a marker, not a snapshot (its text never equals a
     // rendered recall, so it could not match either — the form check just
     // keeps the set honest).
-    if (source.kind !== 'plugin' || source.plugin !== pluginName || source.form !== 'snapshot') continue
+    if (source.kind !== 'hindsight' || source.form !== 'snapshot') continue
     if (onSurface.has(event.seq)) retained.push({ seq: event.seq, text: snapshotText(event.data), message: event.data })
   }
   return retained
