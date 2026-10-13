@@ -75,7 +75,7 @@ Two things to know about the row:
 | `baseUrl` | `http://127.0.0.1:8888` | Your Hindsight server's address. |
 | `apiKeyRef` | — | **The way to give the plugin its key** — a *name* for the secret, not the secret itself. The value is looked up on every call (environment → `~/.dsh/.credentials.yaml` → `.env` files), so rotating the key needs no restart and the key never sits in a config file. See below. |
 | `apiKey` | — | A plain key in the config, instead of a reference. Prefer `apiKeyRef`. |
-| `autoContext` | `true` | Set `false` to turn off the automatic recall (each turn's first step, any human intervention claimed mid-turn, the mid-step agent-output recall, and the post-compaction recall; the `hindsight` tool stays). |
+| `autoContext` | `true` | Set `false` to turn off the automatic recall (each turn's first step, any human intervention claimed mid-turn, the mid-step agent-output recall, the post-compaction recall, and the opt-in pre-execution lesson gate; the `hindsight` tool stays). |
 | `prefetch` | `true` | `true` (default): the recall starts as the *previous* turn ends, so from the second turn on it targets the previous message. `false`: every turn queries the message you just sent and waits on the server for it — the memory is always relevant to what you just said, at the cost of the server's latency on every first model call. |
 | `recallContextTurns` | `5` | How many of your recent turns ride along in the recall's query, so the bank can match memories against what the conversation was about, not just the last message. The query is the anchor message under a `Prior context:` block of the recent prior turns (one line per user/assistant message), capped at 1000 characters with the oldest lines dropped first. `1` (what the reference integrations ship) is the plain single-message query. |
 | `recallPreserve` | `true` | `true` (the default): the model context is append-only — every committed recall snapshot stays in the conversation, so later turns see the memories that were recalled earlier. `false`: the model context carries only the *latest* full snapshot — each new one retires the previous full card in place (a one-line tombstone marker stays where that turn's recall fired, its full tokens metered out of the pricing) and lands as a fresh card at its own turn, while the durable session log keeps every full snapshot for replay and audit. The naming matches llama-server's `--no-reasoning-preserve`: with it off, a turn's snapshot, like its reasoning, lives for that turn only. |
@@ -83,6 +83,9 @@ Two things to know about the row:
 | `recallAfterReasoning` | `false` | Like `recallAfterText`, but anchored on the previous step's committed **reasoning**. With both keys on, the two anchors are combined into ONE recall (the reasoning first, then the text) - never two lookups. |
 | `actionLessons` | `false` | `true`: at a step past the first whose claim carries no human message, the plugin matches the previous step's committed **tool calls** against the bank's failure lessons (its `experience` memories) and commits a collapsed notice row (no label - just its summary) listing the matches before the next model call. A previous step without tool calls anchors nothing (no bank call); each lesson shows at most once per turn; subagent sessions stay silent. |
 | `actionLessonCandidates` | `10` | How many lesson lines the `actionLessons` notice row renders - the recall is unbounded by this key, the row keeps the first matches. |
+| `lessonGate` | `false` | `true`: before a call to a tool named in `lessonGateTools` is executed, the PENDING call itself anchors a bounded recall on the bank's failure lessons (its `experience` memories), and a hit whose match score is at or above `lessonGateMinScore` DENIES the call before the tool body runs: the model sees the rendered lessons as the tool's error result and learns from the recall before the action acts. Subagent sessions stay silent; only the named tools pay the lookup; a timeout or bank failure allows the call (no bank, no gate). Off by default. |
+| `lessonGateMinScore` | `0.3` | The minimum match score at which the gate denies a gated call (a hit under the threshold, or a hit without any score, allows the call). |
+| `lessonGateTools` | `bash`, `run_code` | The tool names the gate covers - only these calls pay the pre-execution lookup (the default is the side-effect-capable executors). |
 | `recallAfterCompaction` | `false` | `true`: right after a *successful* context compaction, the plugin recalls the bank on the conversation's last human message (the same `Prior context:` composition as the prefetch) and lands the snapshot directly on the surface - the row is labeled `recall:compact - <ms>ms`. A compaction fires outside any step (at a turn boundary, mid-step under context pressure, or on a request retry), so there is no step to hang the recall on; the lookup is detached and bounded by `autoContextTimeoutMs`, and a *failed* compaction recalls nothing. Off by default. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `4096` | How much memory to bring back per recall. |
@@ -144,6 +147,20 @@ directly on the surface, labeled `recall:compact - <ms>ms`. A failed
 compaction (the server reports the error) recalls nothing, subagent
 sessions stay silent, and an unchanged recall commits nothing - or the
 "no new memories" marker row, as everywhere else.
+A separate opt-in surface, `lessonGate` (off by default), does the
+lesson dance at EXECUTION time instead of step time: before a call to
+a tool named in `lessonGateTools` (default `bash` and `run_code`) is
+executed, the pending call itself anchors a bounded recall on the
+bank's failure lessons - its `experience` memories - and a match whose
+score is at or above `lessonGateMinScore` (default `0.3`) DENIES the
+call before the tool body runs: the rendered lessons travel as the
+tool's error result, so the model learns from the recall before the
+action acts. It composes with `actionLessons` (the gate prevents the
+first execution; the notice reinforces it after the result) without
+sharing state - the gate commits nothing and is never de-duplicated,
+because the denial is the model's only feedback channel. Subagent
+sessions stay silent, only the named tools pay the lookup, and a
+timeout, an aborted call, or a bank failure allows the call.
 The query is not just that one message: with the default
 `recallContextTurns: 5`, the last few turns of the conversation ride
 along under a `Prior context:` block (one line per message, capped at

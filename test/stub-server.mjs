@@ -94,9 +94,15 @@ const server = http.createServer((req, res) => {
           if (memory.observation) hit.source_fact_ids = memory.source_fact_ids
           // Deterministic score, like the real server: the query-word overlap,
           // exposed on every result under `scores` (the plugin renders
-          // reranker ?? final from it).
+          // reranker ?? final from it). A query carrying the test token
+          // `score:<number>` pins the score on every hit, so the client's
+          // score handling (the gate's min-score threshold) is testable
+          // without depending on the overlap.
           const text = memory.text.toLowerCase()
-          const overlap = words.filter(word => text.includes(word)).length
+          const pinned = /score:(\d+(?:\.\d+)?)/.exec(String(data.query ?? ''))
+          const overlap = pinned !== null
+            ? Number(pinned[1])
+            : words.filter(word => text.includes(word)).length
           hit.scores = { final: overlap, reranker: overlap, semantic: overlap, keyword: overlap }
           return hit
         })

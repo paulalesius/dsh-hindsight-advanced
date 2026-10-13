@@ -104,6 +104,19 @@
  *   `--no-reasoning-preserve` flag: with it off, the server keeps each
  *   turn's reasoning only for that turn.
  *
+ *   The pre-execution lesson gate (`lessonGate`, default off) is the
+ *   memory layer's execution touch, opt-in by default: before a call to
+ *   a tool named in `lessonGateTools` (default `bash` and `run_code`) is
+ *   executed, the PENDING call itself anchors a bounded recall on the
+ *   bank's `experience` memories; a match at or above
+ *   `lessonGateMinScore` (default 0.3) DENIES the call - the harness
+ *   surfaces the rendered lessons as `Error: <reason>` and the tool
+ *   body never runs, so the model learns from the recall before the
+ *   action acts. It composes with `actionLessons` (the gate prevents
+ *   the first execution; the notice reinforces it after the result)
+ *   without sharing state: the gate commits nothing and is never
+ *   de-duplicated.
+ *
  * Visibility tiers (the plugin's tag model — the model never sees tags):
  * the plugin tags every stored memory with at most ONE tier's tag, and the
  * item's tag set is its scope:
@@ -200,6 +213,31 @@
  * - `actionLessonCandidates`: default `10`: the cap on the lesson lines
  *   the `actionLessons` notice row renders (the recall itself is
  *   unbounded by this key; the row keeps the first matches).
+ * - `lessonGate`: default `false`. The pre-execution lesson gate:
+ *   before a call to a tool named in `lessonGateTools` is executed, the
+ *   PENDING call itself anchors a bounded recall restricted to the
+ *   bank's `experience`-type memories (the failure lessons) - the same
+ *   anchor shape as the `actionLessons` pass. A hit whose match score
+ *   (the reranker's normalized score when the bank computed one, else
+ *   the combined score) is at or above `lessonGateMinScore` DENIES the
+ *   call before the tool body runs: the harness materializes
+ *   `Error: <reason>` as the tool result and the rendered lessons
+ *   travel in the reason, so the model learns from the recall before
+ *   the action acts. The gate is a separate surface, not a mode of
+ *   `actionLessons`: it returns a decision, commits nothing to the
+ *   session, and is never per-turn de-duplicated (a repeated denial
+ *   re-carries the lessons - the denial is the model's only feedback
+ *   channel). Subagent sessions are skipped; only the named tools pay
+ *   the lookup; a timeout, an aborted call, or a bank failure allows
+ *   the call (no bank, no gate). Gated by `autoContext` like every
+ *   automatic branch.
+ * - `lessonGateMinScore`: default `0.3`: the minimum match score at
+ *   which the gate denies a gated call (a hit under the threshold, or
+ *   a hit without any score, allows the call). A finite number in
+ *   `[0, 1]`.
+ * - `lessonGateTools`: default `['bash', 'run_code']`: the tool names
+ *   the gate covers (only these calls pay the bounded lookup before
+ *   execution; the default is the side-effect-capable executors).
  * - `recallPreserve` — default `true`: the model surface is append-only
  *   for the snapshots — every committed recall stays in the model context.
  *   `false`: the surface carries only the LATEST full snapshot — each new
@@ -227,9 +265,10 @@
  *   next operation retries the sync).
  *
  * The plugin provides no service of its own (it registers into the tools
- * registry and listens on `agent/pre-step`, `agent/turn-stopping`, and
- * `agent/disposed`), so its preset row needs no isolate realm — the same
- * as the preset's other tool rows.
+ * registry and listens on `agent/pre-step`, `agent/turn-stopping`,
+ * `session/event`, `tools/pre-execute`, and `agent/disposed`), so its
+ * preset row needs no isolate realm - the same as the preset's other
+ * tool rows.
  *
  * Code layout: this file is the entry the loader imports (the Plugin.Object
  * contract: `name`/`inject`/`Config`/`apply`); `src/` holds the modules —
@@ -237,7 +276,8 @@
  * Standard-Schema validator), `client` (the REST transport), `bank` (the
  * per-mount factory and its operations), `snapshot` (auto-recall surface
  * logic), `tool` (the model-facing tool), `autorecall` (the pre-step
- * consumer + turn-stopping prefetch + disposal cleanup).
+ * consumer + turn-stopping prefetch + post-compaction recall + the
+ * pre-execution lesson gate + disposal cleanup).
  *
  * @module dsh-plugin-hindsight-advanced
  */
@@ -297,18 +337,20 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   /** One mount: the bank's operations and its per-mount state. */
   const mount = createMount(config, buildResolveApiKey(ctx, config))
 
-  // One mount owns all four auto-recall listeners: pre-step consumes the
-  // slot, turn-stopping fills it, session-event recalls after a successful
-  // compaction (opt-in), and disposal clears it - the slot map lives in
-  // the closure they share. `ctx` is threaded for the recallPreserve
-  // shadow price (an untyped `ctx.get('tokenMeter')` at commit time —
-  // optional, so a composition without the meter degrades to an unpriced
-  // replace).
+  // One mount owns all five listeners: pre-step consumes the slot,
+  // turn-stopping fills it, session-event recalls after a successful
+  // compaction (opt-in), tools/pre-execute gates a pending call against
+  // the bank's failure lessons (opt-in), and disposal clears it - the
+  // slot map lives in the closure they share. `ctx` is threaded for the
+  // recallPreserve shadow price (an untyped `ctx.get('tokenMeter')` at
+  // commit time - optional, so a composition without the meter degrades
+  // to an unpriced replace).
   const autoRecall = buildAutoRecall(mount, ctx)
 
   ctx.on('agent/pre-step', autoRecall.preStep, { prepend: true })
   ctx.on('agent/turn-stopping', autoRecall.turnStopping)
   ctx.on('session/event', autoRecall.sessionEvent)
+  ctx.on('tools/pre-execute', autoRecall.toolGate)
   ctx.on('agent/disposed', autoRecall.disposed)
 
   ctx.tools.register(buildTool(mount))

@@ -48,7 +48,13 @@
 // skipped, an unchanged recall commits the marker row (or nothing under
 // recallPreserve: false), and the recallPreserve: false direct commit
 // retires the previous full card in place (tombstone + adjacent shadow
-// price, fresh card appended).
+// price, fresh card appended),
+// plus the pre-execution lesson gate (lessonGate, default off): a pending
+// call to a tool named in lessonGateTools anchors a bounded experience-only
+// recall on the call itself; a hit at or above lessonGateMinScore DENIES
+// the call before the tool body runs (the rendered lessons travel in the
+// reason), a sub-threshold hit allows, and a timeout / unanchored call /
+// subagent session / non-gated tool passes with no bank call at all.
 import assert from 'node:assert/strict'
 import { start, state } from './stub-server.mjs'
 
@@ -86,6 +92,9 @@ assert.deepEqual(standard.value, {
   autoContextTimeoutMs: 2500,
   actionLessons: false,
   actionLessonCandidates: 10,
+  lessonGate: false,
+  lessonGateMinScore: 0.3,
+  lessonGateTools: ['bash', 'run_code'],
   retainScope: 'preset',
 })
 
@@ -150,6 +159,26 @@ assert.ok('value' in postCompact, JSON.stringify(postCompact))
 assert.equal(postCompact.value.recallAfterCompaction, true)
 const badPostCompact = validate({ bank: 'x', recallAfterCompaction: 'yes' })
 assert.ok('issues' in badPostCompact && badPostCompact.issues.some(issue => issue.path?.[0] === 'recallAfterCompaction'), JSON.stringify(badPostCompact))
+
+// lessonGate / lessonGateMinScore / lessonGateTools: off by default
+// (the pre-execution gate is opt-in); opt-in + validation
+const gateOn = validate({ bank: 'x', lessonGate: true })
+assert.ok('value' in gateOn, JSON.stringify(gateOn))
+assert.equal(gateOn.value.lessonGate, true)
+assert.equal(gateOn.value.lessonGateMinScore, 0.3)
+assert.deepEqual(gateOn.value.lessonGateTools, ['bash', 'run_code'])
+const gateTuned = validate({ bank: 'x', lessonGate: true, lessonGateMinScore: 0.7, lessonGateTools: ['bash'] })
+assert.ok('value' in gateTuned, JSON.stringify(gateTuned))
+assert.equal(gateTuned.value.lessonGateMinScore, 0.7)
+assert.deepEqual(gateTuned.value.lessonGateTools, ['bash'])
+const badGate = validate({ bank: 'x', lessonGate: 'yes' })
+assert.ok('issues' in badGate && badGate.issues.some(issue => issue.path?.[0] === 'lessonGate'), JSON.stringify(badGate))
+const badGateScore = validate({ bank: 'x', lessonGateMinScore: 1.5 })
+assert.ok('issues' in badGateScore && badGateScore.issues.some(issue => issue.path?.[0] === 'lessonGateMinScore'), JSON.stringify(badGateScore))
+const badGateScoreNeg = validate({ bank: 'x', lessonGateMinScore: -0.2 })
+assert.ok('issues' in badGateScoreNeg && badGateScoreNeg.issues.some(issue => issue.path?.[0] === 'lessonGateMinScore'))
+const badGateTools = validate({ bank: 'x', lessonGateTools: ['bash', 7] })
+assert.ok('issues' in badGateTools && badGateTools.issues.some(issue => issue.path?.[0] === 'lessonGateTools'), JSON.stringify(badGateTools))
 
 // bank is required
 const none = validate({})
@@ -918,8 +947,8 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   const tool = ctx.tools.registered[0]
   assert.deepEqual(
     ctx.listeners.map(entry => entry.event),
-    ['agent/pre-step', 'agent/turn-stopping', 'session/event', 'agent/disposed'],
-    'the mount registers pre-step (consumer), turn-stopping (producer), session-event (post-compaction recall), disposed (cleanup)',
+    ['agent/pre-step', 'agent/turn-stopping', 'session/event', 'tools/pre-execute', 'agent/disposed'],
+    'the mount registers pre-step (consumer), turn-stopping (producer), session-event (post-compaction recall), tools/pre-execute (the lesson gate), disposed (cleanup)',
   )
   assert.deepEqual(ctx.listeners[0].options, { prepend: true })
 
@@ -1076,7 +1105,7 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   plugin.apply(ctx4, { ...standard.value, baseUrl: stubUrl, bank: 'prefetch-discard' })
   const preStep4 = ctx4.listeners[0].fn
   const turnStopping4 = ctx4.listeners[1].fn
-  const disposed = ctx4.listeners[3].fn
+  const disposed = ctx4.listeners[4].fn
   const carol = { session: makeSession('sess-p4', { agentPreset: 'standard' }) }
   const discardRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/prefetch-discard/memories/recall').length
   await ctx4.tools.registered[0].execute({ action: 'retain', text: 'The project uses a Postgres database.' }, { signal: baseSignal })
@@ -1780,6 +1809,100 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(snapshots(otto.session).length, 2, 'an identical refresh commits nothing (no churn)')
   assert.equal(keepRecalls().length, 3, 'the lookup still ran on the identical refresh (turn recall, refresh, identical)')
   console.log('ok  mount N: recallPreserve: false retires the previous full card in place on the direct commit (tombstone + shadow price)')
+}
+
+// ── mount O: the pre-execution lesson gate (lessonGate, default off) ───────
+{
+  const gateRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/gate/memories/recall')
+  const allowNext = async () => ({ kind: 'allow' })
+  const call = (name, argumentsX, agentX) => ({ name, arguments: argumentsX, agent: agentX, signal: baseSignal })
+
+  // O-off: the default-off key delegates to next() with no bank call at all.
+  const ctxOff = makeCtx()
+  plugin.apply(ctxOff, { ...standard.value, baseUrl: stubUrl, bank: 'gate', prefetch: false })
+  const offGate = ctxOff.listeners[3].fn
+  assert.deepEqual(await offGate(call('bash', { command: 'whatever' }, agent), allowNext), { kind: 'allow' })
+  assert.equal(gateRecalls().length, 0, 'default-off: no gate lookup')
+  console.log('ok  mount O: lessonGate is off by default (next() delegated, no lookup)')
+
+  // O-gate: on. Seed the failure lessons the pending calls will match.
+  const ctx = makeCtx()
+  plugin.apply(ctx, { ...standard.value, baseUrl: stubUrl, bank: 'gate', prefetch: false, lessonGate: true })
+  const gate = ctx.listeners[3].fn
+  const tool = ctx.tools.registered[0]
+  await tool.execute({ action: 'retain', text: '[experience] the deploy script needs the RELEASE_CHANNEL env set or it ships the dev build.' }, { signal: baseSignal })
+  await tool.execute({ action: 'retain', text: '[experience] the pinned score probe failed on the fixture run.' }, { signal: baseSignal })
+  await tool.execute({ action: 'retain', text: 'The gate documentation lives in the repo.' }, { signal: baseSignal })
+  const seed = state.memories.find(memory => memory.text.startsWith('the deploy script needs'))
+  const g1 = { session: makeSession('sess-g1') }
+
+  // O-deny: a pending bash call whose anchor words overlap the lesson
+  // (the score is above the default 0.3) is denied BEFORE execution; the
+  // lookup is experience-only, the anchor is the pending call itself, and
+  // the reason carries the rendered lesson (score + id). Nothing is
+  // committed to the session.
+  const beforeDeny = gateRecalls().length
+  const denied = await gate(call('bash', { command: 'deploy script ships the dev build' }, g1), allowNext)
+  assert.equal(gateRecalls().length, beforeDeny + 1, 'one gate lookup for the pending call')
+  assert.deepEqual(state.requests.at(-1).body.types, ['experience'], 'the gate lookup is experience-only')
+  assert.ok(state.requests.at(-1).body.query.startsWith('bash: deploy script'), 'the anchor is the pending call itself')
+  assert.equal(denied.kind, 'deny', 'a strong match denies the call')
+  assert.ok(denied.reason.startsWith('denied by the hindsight lesson gate:'), 'the denial carries the gate header')
+  assert.ok(denied.reason.includes(`id:${seed.id}`), 'the denial carries the lesson id')
+  assert.ok(denied.reason.includes('(match 4.000)'), 'the denial carries the match score')
+  assert.ok(!denied.reason.includes('gate documentation'), 'the world seed never surfaces through the gate')
+  assert.equal(g1.session.events.length, 0, 'the gate commits nothing to the session')
+  console.log('ok  mount O: a strong lesson match denies the pending call (reason carries the lesson)')
+
+  // O-boundary: a hit AT lessonGateMinScore denies (>=, not >); a hit
+  // UNDER it allows - the lookup ran, the threshold filtered the hit.
+  const beforeEdge = gateRecalls().length
+  assert.equal((await gate(call('bash', { command: 'pinned score:0.3' }, g1), allowNext)).kind, 'deny', 'a hit at the threshold denies')
+  const beforeBelow = gateRecalls().length
+  assert.deepEqual(await gate(call('bash', { command: 'pinned score:0.1' }, g1), allowNext), { kind: 'allow' }, 'a sub-threshold hit allows')
+  assert.equal(beforeBelow, beforeEdge + 1, 'the edge lookup ran; the sub-threshold lookup ran too')
+  console.log('ok  mount O: the threshold is inclusive (at denies, under allows)')
+
+  // O-run_code: run_code is in the default lessonGateTools and pays the
+  // lookup (its args line anchors the same lesson).
+  const beforeCode = gateRecalls().length
+  const codeDenied = await gate(call('run_code', { code: 'deploy script ships the dev build' }, g1), allowNext)
+  assert.equal(codeDenied.kind, 'deny', 'run_code is gated by default')
+  assert.ok(state.requests.at(-1).body.query.startsWith('run_code code='), 'the run_code anchor is the args line')
+  assert.equal(gateRecalls().length, beforeCode + 1)
+  console.log('ok  mount O: run_code is gated by the default lessonGateTools')
+
+  // O-filter: a tool outside lessonGateTools pays no lookup at all.
+  const beforeFilter = gateRecalls().length
+  assert.deepEqual(await gate(call('read', { path: 'deploy script ships' }, g1), allowNext), { kind: 'allow' })
+  assert.equal(gateRecalls().length, beforeFilter, 'non-gated tools pay no lookup')
+  console.log('ok  mount O: tools outside lessonGateTools pass without a lookup')
+
+  // O-timeout: a slow bank allows the call (no bank, no gate).
+  state.recallDelayMs = 400
+  try {
+    const ctxSlow = makeCtx()
+    plugin.apply(ctxSlow, { ...standard.value, baseUrl: stubUrl, bank: 'gate', prefetch: false, lessonGate: true, autoContextTimeoutMs: 120 })
+    const slowGate = ctxSlow.listeners[3].fn
+    assert.deepEqual(await slowGate(call('bash', { command: 'deploy script ships the dev build' }, g1), allowNext), { kind: 'allow' }, 'a timeout allows the call')
+  } finally {
+    state.recallDelayMs = 0
+  }
+  console.log('ok  mount O: a timeout allows the call (failure isolation)')
+
+  // O-subagent: subagent sessions are skipped before the lookup (total
+  // silence).
+  const beforeSub = gateRecalls().length
+  assert.deepEqual(await gate(call('bash', { command: 'deploy script ships the dev build' }, subagent), allowNext), { kind: 'allow' })
+  assert.equal(gateRecalls().length, beforeSub, 'subagent: no gate lookup')
+  console.log('ok  mount O: subagent sessions stay silent')
+
+  // O-args: arguments that anchor nothing (non-object) allow without a
+  // lookup.
+  const beforeArgs = gateRecalls().length
+  assert.deepEqual(await gate(call('bash', null, g1), allowNext), { kind: 'allow' })
+  assert.equal(gateRecalls().length, beforeArgs, 'unanchored arguments pay no lookup')
+  console.log('ok  mount O: unanchored arguments pass without a lookup')
 }
 
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────

@@ -121,10 +121,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
+import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 
 import type { Mount } from './bank.ts'
 import './source.ts'
-import { composeRecallQuery, findRetainedSnapshots, lessonAnchor, midStepAnchor, previousStepAssistant, queryFromHumanMessages, queryFromMessages, queryFromSession, renderLesson, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
+import { GATE_DENIAL_LINES, callArgsLine, composeRecallQuery, findRetainedSnapshots, lessonAnchor, midStepAnchor, previousStepAssistant, queryFromHumanMessages, queryFromMessages, queryFromSession, renderGateDenial, renderLesson, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
 import type { MidStepKind } from './snapshot.ts'
 import type { DirectiveRule, LessonHit, RecallHit } from './types.ts'
 
@@ -251,6 +252,16 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  *   the bounded lookup anchored on the log's last human message commits
  *   the snapshot DIRECTLY to the surface (`commitSnapshotDirect` - no
  *   decision exists at event time); subagent sessions are skipped;
+ * - `toolGate` - the pre-execution lesson gate (`lessonGate`, default
+ *   off, gated by `autoContext`): on `tools/pre-execute`, the pending
+ *   call anchors a bounded `experience`-only recall on itself; a hit at
+ *   or above `lessonGateMinScore` returns `deny` with the rendered
+ *   lessons as the reason (the harness materializes `Error: <reason>`
+ *   as the tool result and the tool body never runs, so the model
+ *   learns from the recall before the action acts); every other
+ *   outcome delegates to `next()` (no bank, no gate). Subagent
+ *   sessions are skipped; only the `lessonGateTools` names pay the
+ *   lookup;
  * - `disposed` — aborts and drops the session's slot.
  *
  * At most one live slot per session: created at turn-stopping, consumed or
@@ -262,7 +273,7 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
 export function buildAutoRecall(
   mount: Mount,
   ctx: Context,
-): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; sessionEvent: (session: Session, event: SessionEvent) => void; disposed: (payload: DisposedPayload) => void } {
+): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; sessionEvent: (session: Session, event: SessionEvent) => void; toolGate: (payload: ToolExecution, next: () => Promise<PreToolDecision>) => Promise<PreToolDecision>; disposed: (payload: DisposedPayload) => void } {
   const config = mount.config
   const slots = new Map<string, Slot>()
   // The lesson rows already surfaced, per session and turn: a memory id is
@@ -793,10 +804,53 @@ export function buildAutoRecall(
     })
   }
 
+  /**
+   * The pre-execution lesson gate (`lessonGate`, default off, gated by
+   * `autoContext`): on `tools/pre-execute`, a bounded `experience`-only
+   * recall anchors on the PENDING call itself (the same anchor shape as
+   * the `actionLessons` pass, through `callArgsLine`); a hit whose match
+   * score is at or above `lessonGateMinScore` returns `deny` with the
+   * rendered lessons as the reason - the harness materializes
+   * `Error: <reason>` as the tool result and the tool body never runs,
+   * so the model learns from the recall before the action acts. The
+   * gate is a separate surface, not a mode of `actionLessons`: it
+   * commits nothing to the session and is never per-turn de-duplicated
+   * (a repeated denial re-carries the lessons - the denial is the
+   * model's only feedback channel). Every other outcome delegates to
+   * `next()` (allow, honoring the downstream policy): the gate is off,
+   * the call carries no agent (nothing to skip or anchor), the call is
+   * not named in `lessonGateTools`, its arguments anchor nothing, no
+   * hit reaches the threshold, the signal is already aborted, or the
+   * lookup timed out or the bank failed - no bank, no gate. Subagent
+   * sessions are skipped before the lookup (total silence).
+   */
+  const toolGate = async (
+    exec: ToolExecution,
+    next: () => Promise<PreToolDecision>,
+  ): Promise<PreToolDecision> => {
+    if (!config.autoContext || !config.lessonGate) return next()
+    const agent = exec.agent
+    if (agent === undefined) return next()
+    const session = agent.session
+    if (session.header?.origin === 'subagent') return next()
+    if (!config.lessonGateTools.includes(exec.name)) return next()
+    if (exec.signal.aborted) return next()
+    const line = callArgsLine(exec.name, exec.arguments)
+    if (line.length === 0) return next()
+    const hits = await lessonLookup(session, line, exec.signal)
+    if (hits === null) return next()
+    const matched = hits.filter(hit => {
+      const score = hit.score?.reranker ?? hit.score?.final
+      return typeof score === 'number' && score >= config.lessonGateMinScore
+    })
+    if (matched.length === 0) return next()
+    return { kind: 'deny', reason: renderGateDenial(config.bank, exec.name, matched.slice(0, GATE_DENIAL_LINES)) }
+  }
+
   const disposed = ({ agent }: DisposedPayload): void => {
     discardSlot(agent.session.id)
     lessonSeen.delete(agent.session.id)
   }
 
-  return { preStep, turnStopping, sessionEvent, disposed }
+  return { preStep, turnStopping, sessionEvent, toolGate, disposed }
 }

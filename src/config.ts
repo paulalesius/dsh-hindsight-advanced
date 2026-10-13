@@ -67,6 +67,36 @@ export interface ResolvedConfig {
    *  bank's recall may return more; the surplus is dropped before render).
    *  Default 10. */
   actionLessonCandidates: number
+  /** `true`: the pre-execution lesson gate. Before a call to a tool named
+   *  in `lessonGateTools` is executed, a bounded recall restricted to the
+   *  bank's `experience`-type memories (the failure lessons) anchors on
+   *  the PENDING call itself (the same anchor shape as the
+   *  `actionLessons` pass: `bash: <command>` for bash, `name key=value`
+   *  for scalar args). A hit whose match score (the reranker's normalized
+   *  score when the bank computed one, else the combined score) is at or
+   *  above `lessonGateMinScore` DENIES the call before the tool body
+   *  runs: the harness materializes `Error: <reason>` as the tool result
+   *  and the rendered lessons travel in the reason, so the model learns
+   *  from the recall before the action acts. The gate is a separate
+   *  surface, not a mode of `actionLessons`: it returns a decision,
+   *  commits nothing to the session, and is never per-turn de-duplicated
+   *  (a repeated denial re-carries the lessons - the denial is the
+   *  model's only feedback channel). Subagent sessions are skipped (total
+   *  silence); only the `lessonGateTools` names pay the lookup; a
+   *  timeout, an aborted call, or a bank failure delegates to `next()`
+   *  (allow) - no bank, no gate. Gated by `autoContext` like every
+   *  automatic branch. Default `false`. */
+  lessonGate: boolean
+  /** The minimum match score (the reranker's normalized score when the
+   *  bank computed one, else the combined score) at which the
+   *  pre-execution lesson gate denies a gated call: a hit under the
+   *  threshold allows the call, and a hit without any score is under it.
+   *  A finite number in `[0, 1]`. Default `0.3`. */
+  lessonGateMinScore: number
+  /** The tool names the pre-execution lesson gate covers: only calls named
+   *  here pay the bounded lookup before execution. Default
+   *  `['bash', 'run_code']` (the side-effect-capable executors). */
+  lessonGateTools: string[]
   /** `true`: right after a SUCCESSFUL context compaction (the
    *  `compaction/end` session event without an `error`), the bank is
    *  queried for the last HUMAN message on the durable log - the same
@@ -120,6 +150,14 @@ const DEFAULT_RECALL_CONTEXT_TURNS = 5
 /** How many action-lesson hits the lesson row renders by default (the
  *  client-side cap applied before render; see {@link ResolvedConfig.actionLessonCandidates}). */
 const DEFAULT_ACTION_LESSON_CANDIDATES = 10
+/** The default minimum match score at which the pre-execution lesson gate
+ *  denies a call: observed weak matches carry 0.000, so the default sits
+ *  above noise while a genuine match passes. */
+const DEFAULT_LESSON_GATE_MIN_SCORE = 0.3
+/** The default tool names the pre-execution lesson gate covers: the
+ *  side-effect-capable executors, so only those calls pay the bounded
+ *  lookup on the hot path. */
+const DEFAULT_LESSON_GATE_TOOLS = ['bash', 'run_code']
 /** Credential-reference grammar (a POSIX shell identifier), matching the
  *  credentials seam's own `CredentialRef` so an invalid name is a config
  *  issue rather than a per-call resolution surprise. */
@@ -162,6 +200,38 @@ function intFlag(
     return fallback
   }
   return value
+}
+
+/** Read one score flag (a finite number in [0, 1]), collecting an issue on misuse. */
+function scoreFlag(
+  record: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  issues: ConfigIssue[],
+): number {
+  const value = record[key]
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+    issues.push({ message: `${key} must be a number between 0 and 1`, path: [key] })
+    return fallback
+  }
+  return value
+}
+
+/** Read one tool-name list flag, collecting an issue on misuse. */
+function toolListFlag(
+  record: Record<string, unknown>,
+  key: string,
+  fallback: readonly string[],
+  issues: ConfigIssue[],
+): string[] {
+  const value = record[key]
+  if (value === undefined) return [...fallback]
+  if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string' || entry.trim().length === 0)) {
+    issues.push({ message: `${key} must be an array of non-empty tool names`, path: [key] })
+    return [...fallback]
+  }
+  return value.map(entry => String(entry).trim())
 }
 
 /**
@@ -275,6 +345,9 @@ export const Config: {
         recallAfterReasoning: boolFlag(record, 'recallAfterReasoning', false, issues),
         actionLessons: boolFlag(record, 'actionLessons', false, issues),
         actionLessonCandidates: intFlag(record, 'actionLessonCandidates', DEFAULT_ACTION_LESSON_CANDIDATES, issues),
+        lessonGate: boolFlag(record, 'lessonGate', false, issues),
+        lessonGateMinScore: scoreFlag(record, 'lessonGateMinScore', DEFAULT_LESSON_GATE_MIN_SCORE, issues),
+        lessonGateTools: toolListFlag(record, 'lessonGateTools', DEFAULT_LESSON_GATE_TOOLS, issues),
         recallAfterCompaction: boolFlag(record, 'recallAfterCompaction', false, issues),
         recallPreserve: boolFlag(record, 'recallPreserve', true, issues),
         retainAsync: boolFlag(record, 'retainAsync', false, issues),

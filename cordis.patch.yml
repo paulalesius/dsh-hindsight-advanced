@@ -96,6 +96,30 @@
         # bounded by autoContextTimeoutMs.
         # recallAfterCompaction: false
 
+        # false - off. true - the pre-execution lesson gate: before a
+        # call to a tool named in lessonGateTools is executed, the
+        # PENDING call itself anchors a bounded recall on the bank's
+        # experience-type memories (failure lessons); a hit whose match
+        # score is at or above lessonGateMinScore DENIES the call
+        # before the tool body runs - the rendered lessons travel as
+        # the tool's error result, so the model learns from the recall
+        # before the action acts. A sub-threshold hit, a timeout, an
+        # aborted call, or a bank failure allows the call (no bank,
+        # no gate); subagent sessions stay silent; the gate commits
+        # nothing and is never de-duplicated (the denial is the
+        # model's only feedback channel).
+        # lessonGate: false
+
+        # 0.3 - the minimum match score at which the gate denies a
+        # gated call (a hit under the threshold, or a hit without any
+        # score, allows the call).
+        # lessonGateMinScore: 0.3
+
+        # bash, run_code - the tool names the gate covers (only these
+        # calls pay the pre-execution lookup; the default is the
+        # side-effect-capable executors).
+        # lessonGateTools: [bash, run_code]
+
         # true — the model surface is append-only: every committed recall
         # snapshot stays in the model context. false — the surface carries
         # only the LATEST full snapshot: each new one retires the

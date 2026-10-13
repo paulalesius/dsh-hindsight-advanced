@@ -223,6 +223,10 @@ export const LESSON_QUERY_CHARS = 500
  *  (one or two sentences); the cap keeps the row compact. */
 export const LESSON_HIT_CHARS = 240
 
+/** Cap on the lesson lines the gate denial carries: the denial is the
+ *  model's only feedback channel and must stay compact. */
+export const GATE_DENIAL_LINES = 3
+
 /** One lesson lookup's anchor, extracted from the previous step's committed
  *  assistant message's tool-call blocks. */
 export interface LessonAnchor {
@@ -246,8 +250,22 @@ function toolCallLine(name: string, argumentsJson: string): string {
   } catch {
     return ''
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return ''
-  const record = parsed as Record<string, unknown>
+  return callArgsLine(name, parsed)
+}
+
+/**
+ * One tool call's anchor line, from its PARSED arguments record: a
+ * `bash` call contributes its command verbatim (capped at {@link
+ * LESSON_COMMAND_CHARS}); any other call contributes its name plus its
+ * scalar arguments as `key=value` pairs. Arguments that are not a plain
+ * object contribute nothing. The pre-execution lesson gate anchors the
+ * PENDING call through this same formatter (its `exec.arguments` are
+ * already parsed), so the gate and the `actionLessons` pass can never
+ * drift apart in anchor shape.
+ */
+export function callArgsLine(name: string, args: unknown): string {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return ''
+  const record = args as Record<string, unknown>
   if (name === 'bash') {
     const command = typeof record['command'] === 'string' ? record['command'].trim() : ''
     if (command.length === 0) return ''
@@ -306,6 +324,29 @@ export function renderLesson(bank: string, tool: string, hits: LessonHit[]): { t
   }
   const text = lines.join('\n')
   return { text, summary: `bank ${bank}: ${hits.length} past failure lesson${hits.length === 1 ? '' : 's'} for ${tool} action` }
+}
+
+/**
+ * The gate denial reason: the harness materializes `Error: <reason>` as
+ * the tool result and the tool body never runs, so this text is the
+ * model's only feedback from the gate. A header names the bank and the
+ * pending call; each matched lesson gets one compact line (text capped
+ * at {@link LESSON_HIT_CHARS}, newlines folded) with the bank's match
+ * score (the reranker's normalized score when the bank computed one,
+ * else the combined score) and the lesson's memory id - the same line
+ * shape {@link renderLesson} renders, so a model that sees the denial
+ * and the later `actionLessons` notice recognizes the same lesson.
+ */
+export function renderGateDenial(bank: string, tool: string, hits: LessonHit[]): string {
+  const lines = [`denied by the hindsight lesson gate: past failure lessons from the Hindsight bank "${bank}" match this ${tool} call:`]
+  for (const hit of hits) {
+    const raw = hit.text.replace(/\s*\n\s*/g, ' ')
+    const text = raw.length > LESSON_HIT_CHARS ? `${raw.slice(0, LESSON_HIT_CHARS).trimEnd()}...` : raw
+    const match = hit.score?.reranker ?? hit.score?.final
+    const score = typeof match === 'number' ? ` (match ${match.toFixed(3)})` : ''
+    lines.push(`- ${text}${score} id:${hit.id}`)
+  }
+  return lines.join('\n')
 }
 
 /**

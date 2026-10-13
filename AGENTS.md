@@ -21,7 +21,12 @@ and committing a notice row of past failure lessons), plus - opt-in via
 `recallAfterCompaction` - the post-compaction recall (a successful
 `compaction/end` session event anchors a detached bounded recall on the
 durable log's last HUMAN message and commits its snapshot DIRECTLY to the
-surface, labeled `recall:compact`), against
+surface, labeled `recall:compact`), plus - opt-in via `lessonGate` - the
+pre-execution lesson gate (on `tools/pre-execute`, a pending call to a
+tool named in `lessonGateTools` anchors a bounded `experience`-only
+recall on itself, and a hit at or above `lessonGateMinScore` DENIES the
+call before the tool body runs - the rendered lessons travel as the
+tool's error result), against
 a Hindsight bank. **No DSH
 source modifications, ever** — the whole surface is one entry file plus a
 small tree of dependency-light ESM TypeScript modules in `src/`, resolved
@@ -147,12 +152,14 @@ tree — preserve them when you change anything:
     bank** (self-cleaning, never touches the real banks). New behavior gets
     a check in `test/test.mjs`; wiring against the real API gets a live
     check.
-11. **The failure-lesson pass is a pre-step seam, not a tool-start
-   hook.** DSH exposes no tool-start event, so v1 cannot match a lesson
-   at the exact moment a command is about to run; it takes the closest
-   seam: the `agent/pre-step` hook of a LATER step of a running turn
-   whose claim carries no human message (`actionLessons`, default
-   `false`, gated by `autoContext`). The anchor is the PREVIOUS step's
+11. **The failure-lesson pass is a pre-step seam.** The `agent/pre-step`
+   hook of a LATER step of a running turn whose claim carries no human
+   message (`actionLessons`, default `false`, gated by
+   `autoContext`). (v1 was written before DSH's `tools/pre-execute`
+   gate existed and took the closest seam it had; the true
+   pre-execution match now ships as decision 12, and the two compose:
+   the gate prevents the first execution, the pass reinforces it after
+   the result.) The anchor is the PREVIOUS step's
    committed assistant message's TOOL-CALL blocks (one line per call:
    `bash: <command>` for bash, `name key=value` for scalar args; capped
    at 500 chars), and the recall is bounded and restricted to the
@@ -169,16 +176,42 @@ tree — preserve them when you change anything:
    without tool calls anchors nothing (no bank call); subagent sessions
    are skipped BEFORE the block (total silence, no recall of any kind);
    a steering claim never reaches the lesson code; a timeout or failure
-   is a silent discard; one bounded recall pass per step, no v1 score
-   threshold. A TRUE pre-execution hook (matching at the moment a
-   command is about to run) is the documented future path and needs a
-   DSH tool-start event.
+   is a silent discard; one bounded recall pass per step, no score
+   threshold on this surface (the gate, decision 12, owns the
+   threshold).
+
+12. **The pre-execution lesson gate is a `tools/pre-execute`
+   waterfall gate - a NEW surface, not a mode of `actionLessons`.**
+   (`lessonGate`, default `false`, gated by `autoContext`.) On
+   `tools/pre-execute` - the harness's public awaited gate point that
+   runs before the tool body, where a `deny` materializes as an
+   `Error: <reason>` tool result - the PENDING call itself anchors a
+   bounded `experience`-only recall through the same `callArgsLine`
+   anchor shape as the `actionLessons` pass (`bash: <command>` for
+   bash, `name key=value` for scalar args). A hit whose match score
+   (the reranker's normalized score when the bank computed one, else
+   the combined score) is at or above `lessonGateMinScore` (default
+   `0.3`) returns `deny`; the rendered lessons (at most
+   `GATE_DENIAL_LINES`, 3 - a hard bound like the other render caps)
+   travel in the reason, so the model learns from the recall before
+   the action acts. Every other outcome delegates to `next()`: the
+   gate is off, the call carries no agent, the tool is not named in
+   `lessonGateTools` (default `bash`, `run_code`), the arguments
+   anchor nothing, no hit reaches the threshold, the signal is
+   already aborted, or the lookup timed out or the bank failed - no
+   bank, no gate (failure isolation in its strongest form). The gate
+   commits nothing to the session and is NEVER per-turn
+   de-duplicated - a repeated denial re-carries the lessons, because
+   the denial is the model's only feedback channel. Subagent sessions
+   are skipped before the lookup (total silence). The gate adds
+   bounded bank latency to tool dispatch, which is exactly why it
+   ships default-off and behind a tool filter.
 
 ## Layout
 
 | file | role |
 | --- | --- |
-| `hindsight-advanced.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + the four auto-recall listeners (pre-step, turn-stopping, session-event, disposed) |
+| `hindsight-advanced.ts` | the entry: the loader's whole contract (`name`/`inject`/`Config`/`apply`); `apply` builds one mount and registers the tool + the five listeners (pre-step, turn-stopping, session-event, tools/pre-execute, disposed) |
 | `src/types.ts` | shared shapes (`RecallHit`, `RecallOptions`, `LessonHit`, `RecallScores`) |
 | `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
 | `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
@@ -189,16 +222,21 @@ failure-lesson surface (`lessonAnchor` + `toolCallLine`: the previous
 step's committed tool-call blocks as one line per call - `bash:
 <command>` / `name key=value` - capped at 500 chars) and its rendering
 (`renderLesson`: the notice row, 240-char lesson lines, each with its
-match score and the memory's id) |
+match score and the memory's id) + the gate surface (`callArgsLine`:
+the PENDING call's own line - `bash: <command>` capped at 300 chars,
+`name key=value` for scalar args - the anchor shape shared with
+`toolCallLine` + `renderGateDenial`: the denial reason, the gate
+header, at most `GATE_DENIAL_LINES` (3) lesson lines at 240 chars each
+with their match score and id) |
 | `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
 | `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup; a later step's HUMAN intervention anchors its own bounded synchronous lookup on the claimed steer; a later step whose claim carries NO human message takes the same bounded synchronous path when `recallAfterText` / `recallAfterReasoning` are on, anchored on the previous step's committed blocks and labeled by the anchor kind - the `syncRecall` helper (recall, then listDirectives, one combined `autoContextTimeoutMs` bound) shared by both synchronous paths) + the `actionLessons`
 failure-lesson pass (the previous step's committed tool calls anchor a
 bounded `experience`-only recall; a match commits a `form: 'notice'`
 row directly via `session.append`, de-duplicated per turn by memory id)
-+ the `session/event` post-compaction recall (`recallAfterCompaction`: a successful `compaction/end` - `error === undefined` - commits its snapshot DIRECTLY to the surface through `commitSnapshotDirect`, the same `recallPreserve` machinery without a decision; subagent sessions skipped) + surface commit, and `agent/disposed` cleanup |
++ the `session/event` post-compaction recall (`recallAfterCompaction`: a successful `compaction/end` - `error === undefined` - commits its snapshot DIRECTLY to the surface through `commitSnapshotDirect`, the same `recallPreserve` machinery without a decision; subagent sessions skipped) + the `tools/pre-execute` lesson gate (`lessonGate`: the pending call anchors an `experience`-only recall on itself; a hit at or above `lessonGateMinScore` returns `deny` with the rendered lessons as the reason - a separate surface, no commit, no de-duplication; subagent sessions skipped) + surface commit, and `agent/disposed` cleanup |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 59 checks, fourteen mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot retiring the previous full card in place — a `form: 'notice'` tombstone marker in the old slot, shadow-priced by the adjacent log-only `compaction/prune` (old card's full price), while the full new card lands fresh after the triggering message on the decision (the durable log keeping both full snapshots) — an unchanged recall committing nothing, a refused retirement degrading to the append path with the orphaned price harmless, the twelfth the mid-step agent-output recall (`recallAfterText` / `recallAfterReasoning`): a no-human mid-step anchoring the recall on the previous step's committed text (the row labeled `recall:text`, the anchor's own context line dropped, the current turn's human line kept), a reasoning anchor (`recall:think`, the reasoning-only assistant message contributing no context line), both keys composing ONE anchor (reasoning first, then text, ONE recall, labeled `recall:think+text`), the steering claim winning the precedence over the anchor (the intervention path, plain label), a reasoning-only previous step anchoring nothing (pass-through, no bank call), the default-off keys leaving a no-human mid-step untouched, subagent steps staying silent at every step, and the `recallPreserve: false` interplay (the mid-step snapshot retiring the previous full card in place - tombstone + adjacent shadow price, the full card riding the decision with an empty claim; an unchanged mid-step recall a pure no-op, the lookup still ran,
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 65 checks, fifteen mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot retiring the previous full card in place — a `form: 'notice'` tombstone marker in the old slot, shadow-priced by the adjacent log-only `compaction/prune` (old card's full price), while the full new card lands fresh after the triggering message on the decision (the durable log keeping both full snapshots) — an unchanged recall committing nothing, a refused retirement degrading to the append path with the orphaned price harmless, the twelfth the mid-step agent-output recall (`recallAfterText` / `recallAfterReasoning`): a no-human mid-step anchoring the recall on the previous step's committed text (the row labeled `recall:text`, the anchor's own context line dropped, the current turn's human line kept), a reasoning anchor (`recall:think`, the reasoning-only assistant message contributing no context line), both keys composing ONE anchor (reasoning first, then text, ONE recall, labeled `recall:think+text`), the steering claim winning the precedence over the anchor (the intervention path, plain label), a reasoning-only previous step anchoring nothing (pass-through, no bank call), the default-off keys leaving a no-human mid-step untouched, subagent steps staying silent at every step, and the `recallPreserve: false` interplay (the mid-step snapshot retiring the previous full card in place - tombstone + adjacent shadow price, the full card riding the decision with an empty claim; an unchanged mid-step recall a pure no-op, the lookup still ran,
 nothing committed), the thirteenth the failure-lesson pass
 (`actionLessons`): a no-human mid-step anchoring the recall on the
 previous step's committed TOOL CALLS (tool-call lines `bash:
@@ -219,7 +257,19 @@ default-off key staying silent, subagent sessions skipped, an unchanged
 recall committing the marker row (or nothing under `recallPreserve:
 false`), and the `recallPreserve: false` direct commit retiring the
 previous full card in place (tombstone + adjacent shadow price, fresh
-card appended; the identical refresh a pure no-op, the lookup still ran)
+card appended; the identical refresh a pure no-op, the lookup still
+ran), and the fifteenth the pre-execution lesson gate (`lessonGate`,
+default off): a pending call to a named tool anchoring the recall on
+the call itself (experience-only, the pending call's own args line), a
+hit at or above `lessonGateMinScore` denying the call before execution
+(the reason carrying the rendered lessons - score + id - and nothing
+committed to the session), the threshold inclusive (a pinned hit AT
+the threshold denies, UNDER it allows), `run_code` gated by the
+default `lessonGateTools`, tools outside the filter passing with no
+lookup, a timeout allowing the call (failure isolation), subagent
+sessions staying silent, unanchored (non-object) arguments passing
+with no lookup, and the default-off key delegating to next() with no
+bank call
 |
 | `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
@@ -238,7 +288,7 @@ TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
 
-# the stub suite (59 checks)
+# the stub suite (65 checks)
 cd test && node --import ./register.mjs test.mjs
 
 # preset-mount verification (the custom agent preset row)
@@ -296,8 +346,15 @@ HINDSIGHT_API_KEY=<key> node --import ./register.mjs live.mjs
   `compaction/prune`) and lands fresh at its own turn on the decision,
   and the durable log still keeps every full snapshot (tombstones never
   count as snapshots).
-- Subagent auto-recall stays skipped, and a subagent's `session` tier leans
+- Subagent auto-recall stays skipped (the lesson gate included - total
+  silence), and a subagent's `session` tier leans
   at the parent that delegated its task.
+- The pre-execution lesson gate stays deny-only and commits nothing: a
+  `tools/pre-execute` decision, never a session write; a bank failure,
+  a timeout, an aborted call, or a subagent session always degrades to
+  `next()` (allow). Its knobs are validated config fields
+  (`lessonGate`, `lessonGateMinScore`, `lessonGateTools`) - no
+  hardcoded tunables.
 - The bank-config sync is a lazy one-time `PATCH` that rides the next
   operation's signal and never blocks or fails it.
 - The shipped bundle row stays `disabled: true` — activation is always the
