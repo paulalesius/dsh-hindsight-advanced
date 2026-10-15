@@ -106,7 +106,7 @@ export function renderUnchanged(bank: string, hits: RecallHit[], rules: Directiv
 export function renderTombstone(bank: string): { text: string; summary: string } {
   return {
     text: `Hindsight bank "${bank}": a memory snapshot was applied on this turn and was later refreshed; the current snapshot is the newest one below.`,
-    summary: `memory snapshot applied here — refreshed later; the full text is the newest snapshot below`,
+    summary: `memory snapshot applied here - refreshed later; the full text is the newest snapshot below`,
   }
 }
 
