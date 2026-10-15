@@ -28,6 +28,17 @@
  * recall, and the bank of whichever preset it was created from; subagents
  * inherit the parent preset's composition and therefore the same mount.
  *
+ * When TWO mounts reach the same session (a profile-wide row from the
+ * profile AND a row from the session's own preset, different banks), the
+ * PRESET's mount owns the session's automatic recall and the profile-wide
+ * mount steps back: no second snapshot, no second prefetch, no lesson
+ * pass, no lesson gate, no post-compaction recall for it. Its standing
+ * directives are still merged into the preset mount's snapshot as their
+ * own per-bank section, so profile-wide rules keep reaching the session.
+ * With no preset row in play, the profile-wide mount serves the session
+ * exactly as before (and several profile-wide rows at once stay
+ * complementary: one snapshot per bank).
+ *
  * What each mount gives its preset's agents:
  *
  * - a `hindsight` tool with four actions:
@@ -283,7 +294,10 @@
  * contract: `name`/`inject`/`Config`/`apply`); `src/` holds the modules —
  * `types` (shared shapes), `tiers` (the tag/tier model), `config` (the
  * Standard-Schema validator), `client` (the REST transport), `bank` (the
- * per-mount factory and its operations), `snapshot` (auto-recall surface
+ * per-mount factory and its operations), `mounts` (the cross-mount
+ * coordination registry on the shared root context: the most specific
+ * mount owns a session's auto-recall, shadowed mounts merge their standing
+ * directives), `snapshot` (auto-recall surface
  * logic), `tool` (the model-facing tool), `autorecall` (the pre-step
  * consumer + turn-stopping prefetch + post-compaction recall + the
  * pre-execution lesson gate + disposal cleanup).
@@ -297,6 +311,7 @@ import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { buildAutoRecall } from './src/autorecall.ts'
 import { createMount } from './src/bank.ts'
 import { Config, type ResolvedConfig } from './src/config.ts'
+import { HOST_KEY, presetIdOf, registerMount, type MountRecord } from './src/mounts.ts'
 import { buildTool } from './src/tool.ts'
 
 /** Cordis plugin name for loader diagnostics. */
@@ -338,13 +353,34 @@ function buildResolveApiKey(
 /**
  * Register the hindsight tool and the automatic per-turn recall for the
  * lifetime of `ctx`. The bank is fixed by `config` for every session this
- * mount reaches.
+ * mount reaches. The mount registers itself in the shared mount registry
+ * (src/mounts.ts) keyed by the preset id its context sits under, so a
+ * session that a preset mount also covers is served by that preset mount
+ * alone (this one contributing only its standing directives to its
+ * snapshot); the registry entry is removed with this fiber's disposal.
  * @param ctx - plugin context; registrations unwind with it.
  * @param config - validated plugin configuration.
  */
 export function apply(ctx: Context, config: ResolvedConfig): void {
   /** One mount: the bank's operations and its per-mount state. */
   const mount = createMount(config, buildResolveApiKey(ctx, config))
+
+  // Cross-mount coordination (src/mounts.ts): when a profile-wide row and
+  // a preset row both reach a session, the preset's mount owns the
+  // session's auto-recall and the profile-wide row steps back, merging
+  // only its standing directives into the preset mount's snapshot. The
+  // registry lives on the shared root context (every context of this
+  // runtime inherits it), keyed by the preset id this apply's context
+  // sits under (host-plane applies register under the host key), and the
+  // record's removal rides this fiber's disposal, so a superseded preset
+  // generation stops shadowing its bank the moment it dies.
+  const record: MountRecord = {
+    key: presetIdOf(ctx) ?? HOST_KEY,
+    bank: config.bank,
+    listDirectives: (signal, session) => mount.listDirectives(signal, session),
+  }
+  const unregister = registerMount(ctx, record)
+  ctx.effect(() => unregister, 'hindsight-advanced:mount-registry')
 
   // One mount owns all five listeners: pre-step consumes the slot,
   // turn-stopping fills it, session-event recalls after a successful
@@ -354,7 +390,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   // recallPreserve shadow price (an untyped `ctx.get('tokenMeter')` at
   // commit time - optional, so a composition without the meter degrades
   // to an unpriced replace).
-  const autoRecall = buildAutoRecall(mount, ctx)
+  const autoRecall = buildAutoRecall(mount, ctx, record)
 
   ctx.on('agent/pre-step', autoRecall.preStep, { prepend: true })
   ctx.on('agent/turn-stopping', autoRecall.turnStopping)

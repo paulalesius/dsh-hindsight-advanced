@@ -59,6 +59,16 @@
  * clock) that the collapsed context row displays in place of the plugin
  * name; the `hindsight` kind stays the attribution identity.
  *
+ * Dual mounting (a profile-wide row and a preset row both reaching one
+ * session, different banks) is coordinated through the shared mount
+ * registry (src/mounts.ts): the session's PRESET mount owns its
+ * auto-recall, and every other applicable mount is silent for that
+ * session - no snapshot, no prefetch, no mid-step or post-compaction
+ * recall, no lesson pass, no lesson gate - while the owner merges the
+ * shadowed mounts' standing directives into its own snapshot (a section
+ * per bank). A session no preset mount covers takes every applicable
+ * mount's full behavior, unchanged (complementary snapshots).
+ *
  * The loop-blocking lookups are bounded: a stopped or slow server costs at
  * most `autoContextTimeoutMs` and the turn proceeds without memory (the
  * detached post-compaction lookup rides its own `recallCompactTimeoutMs`).
@@ -93,8 +103,10 @@
  *   recall leaves the existing snapshots in place.
  *
  * - `recallPreserve: false`: the model surface carries only the LATEST
- *   full snapshot. When a new snapshot refreshes the context, the previous
- *   full card is replaced IN PLACE at its own turn (the session surface's
+ *   full snapshot per bank (a second mount on the same session, a
+ *   different bank, keeps its own card alongside). When a new snapshot
+ *   refreshes the context, the previous full card OF THE SAME BANK is
+ *   replaced IN PLACE at its own turn (the session surface's
  *   `replace` op, landing at the old snapshot's position) by a TOMBSTONE — a
  *   tiny `form: 'notice'` one-line marker ("a snapshot was applied on this
  *   turn and was later refreshed; the current one is the newest below"),
@@ -103,7 +115,7 @@
  *   with a hardcoded `append` surface op, which is exactly where the new
  *   card wants to land). The surface then holds one tombstone per past
  *   recall turn — a visible, in-place record of WHERE each recall fired —
- *   plus exactly one full card, the latest, at its turn. Because the
+ *   plus the latest full card per bank at its turn. Because the
  *   retire-and-replace happens before the decision, it is committed by a
  *   direct, synchronous `session.append` pair: the `compaction/prune`
  *   shadow-price metering record for the old card's full price immediately
@@ -127,8 +139,9 @@ import type { PreToolDecision, ToolExecution } from '@deepseek-ai/dsh-tools'
 
 import type { Mount } from './bank.ts'
 import './source.ts'
+import { mountStance, type MountRecord } from './mounts.ts'
 import { GATE_DENIAL_LINES, callArgsLine, composeRecallQuery, findRetainedSnapshots, lessonAnchor, midStepAnchor, previousStepAssistant, queryFromHumanMessages, queryFromMessages, queryFromSession, renderGateDenial, renderLesson, renderRecall, renderSnapshot, renderTombstone, renderUnchanged } from './snapshot.ts'
-import type { MidStepKind } from './snapshot.ts'
+import type { MidStepKind, RuleSection } from './snapshot.ts'
 import type { DirectiveRule, LessonHit, RecallHit } from './types.ts'
 
 /**
@@ -194,7 +207,10 @@ export interface DisposedPayload {
 /** What one recall listing produces — the payload a snapshot is built from. */
 interface PrefetchedTurn {
   hits: RecallHit[]
-  rules: DirectiveRule[]
+  /** The standing-directive sections, one per contributing bank: the
+   *  mount's own bank first, then the shadowed mounts' merged directives
+   *  under their own banks (dual mounting). */
+  rules: RuleSection[]
   /** Wall-clock ms of the recall + directive listing (the row's label). */
   durationMs: number
 }
@@ -271,10 +287,17 @@ function raceAgainst<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () =>
  * the `recallPreserve: false` shadow-price: it is read with an untyped
  * `ctx.get('tokenMeter')` at commit time (the seam is optional, so a
  * composition without the token meter degrades to an unpriced replace).
+ * `record` is this mount's entry in the shared mount registry
+ * (src/mounts.ts): per session it picks the mount's stance (silent when
+ * the session's preset is served by its own mount, where every surface
+ * above skips the session before touching the bank; otherwise the full
+ * behavior) and names the shadow mounts whose standing directives this
+ * mount merges into its own snapshots.
  */
 export function buildAutoRecall(
   mount: Mount,
   ctx: Context,
+  record: MountRecord,
 ): { preStep: (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>; turnStopping: (payload: TurnStoppingPayload) => void; sessionEvent: (session: Session, event: SessionEvent) => void; toolGate: (payload: ToolExecution, next: () => Promise<PreToolDecision>) => Promise<PreToolDecision>; disposed: (payload: DisposedPayload) => void } {
   const config = mount.config
   const slots = new Map<string, Slot>()
@@ -310,8 +333,10 @@ export function buildAutoRecall(
     }
   }
 
-  /** Start the detached prefetch for `session`'s just-closed turn. */
-  function startPrefetch(session: Session): void {
+  /** Start the detached prefetch for `session`'s just-closed turn.
+   *  `sources` are the shadow mounts (dual mounting) whose standing
+   *  directives are merged into the result, each fetched failure-isolated. */
+  function startPrefetch(session: Session, sources: MountRecord[]): void {
     const previous = slots.get(session.id)
     if (previous !== undefined) {
       previous.controller.abort()
@@ -336,11 +361,15 @@ export function buildAutoRecall(
         const recallPromise = query.length > 0
           ? mount.recall(query, controller.signal, session)
           : Promise.resolve<RecallHit[]>([])
-        const [hits, rules] = await Promise.all([
+        const shadowRules = sources.map(source =>
+          source.listDirectives(controller.signal, session).catch(() => [] as DirectiveRule[]),
+        )
+        const [hits, rules, merged] = await Promise.all([
           recallPromise,
           mount.listDirectives(controller.signal, session),
+          Promise.all(shadowRules),
         ])
-        return { hits, rules, durationMs: Date.now() - startedAt }
+        return { hits, rules: ruleSections(rules, sources, merged), durationMs: Date.now() - startedAt }
       })(),
     }
     // A failed job deletes its own slot — if it is still the current one,
@@ -354,6 +383,15 @@ export function buildAutoRecall(
     slots.set(session.id, entry)
   }
 
+  /** The directive sections of one snapshot: this mount's own bank first,
+   *  then each shadow mount's directives under its own bank name (a
+   *  section whose listing failed or is empty renders nothing). */
+  function ruleSections(own: DirectiveRule[], sources: MountRecord[], shadowRules: DirectiveRule[][]): RuleSection[] {
+    const sections: RuleSection[] = [{ bank: config.bank, rules: own }]
+    sources.forEach((source, i) => sections.push({ bank: source.bank, rules: shadowRules[i] }))
+    return sections
+  }
+
   /** Render hits + rules and commit them as the snapshot message.
    *
    *  `recallPreserve: true` (default): append-only — the snapshot rides
@@ -362,10 +400,15 @@ export function buildAutoRecall(
    *  the turn still gets its visible row, naming the memories it applied).
    *
    *  `recallPreserve: false`: the model surface carries only the LATEST
-   *  full snapshot — one card per past recall turn's TOMBSTONE (a
+   *  full snapshot per bank — one card per past recall turn's TOMBSTONE (a
    *  `form: 'notice'` one-liner installed in place of the retired card, so
-   *  each recall turn keeps a visible, in-place marker) plus the single
-   *  current card at its own turn. The retirement is a direct,
+   *  each recall turn keeps a visible, in-place marker) plus the current
+   *  card at its own turn. Retirement is scoped to this mount's bank (the
+   *  mount attribution recorded on the message source; the bank the
+   *  rendered text names for cards predating that field): a second mount
+   *  on the same session keeps its own latest card, and vice versa: the
+   *  banks' snapshots complement rather than bury each other. The
+   *  retirement is a direct,
    *  synchronous `session.append` pair — the shadow-price
    *  `compaction/prune` (log-only) immediately BEFORE the replacing
    *  `user/message`, the exact adjacency the token meter's shadow-price
@@ -382,14 +425,18 @@ export function buildAutoRecall(
     decision: PreStepDecision,
     session: Session,
     hits: RecallHit[],
-    rules: DirectiveRule[],
+    sections: RuleSection[],
     durationMs: number,
     kind?: MidStepKind,
   ): PreStepDecision {
     if (decision.kind !== 'enter') return decision
-    if (hits.length === 0 && rules.length === 0) return decision
-    const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
-    const retained = findRetainedSnapshots(session)
+    if (hits.length === 0 && sections.every(section => section.rules.length === 0)) return decision
+    const hasRules = sections.some(section => section.rules.length > 0)
+    const text = hasRules ? renderSnapshot(config.bank, hits, sections) : renderRecall(config.bank, hits)
+    // Retirement and the unchanged-recall comparison are scoped to THIS
+    // bank: a second mount on the same session (two banks, one shared
+    // surface) owns its own cards, so neither buries the other's.
+    const retained = findRetainedSnapshots(session).filter(snapshot => snapshot.bank === config.bank)
     const label = kind === undefined ? `recall - ${durationMs}ms` : `recall:${kind} - ${durationMs}ms`
 
     if (!config.recallPreserve) {
@@ -401,7 +448,7 @@ export function buildAutoRecall(
       if (latest !== undefined && latest.text === text) return decision
       const snapshot = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text }] },
+        source: { kind: 'hindsight', bank: config.bank, form: 'snapshot', sections: [{ name: label, text }] },
       })
       try {
         if (latest !== undefined) {
@@ -425,7 +472,7 @@ export function buildAutoRecall(
           const tombstone = renderTombstone(config.bank)
           const marker = createUserMessage({
             content: [{ type: 'text', text: tombstone.text }],
-            source: { kind: 'hindsight', form: 'notice', summary: boundContextSummary(tombstone.summary) },
+            source: { kind: 'hindsight', bank: config.bank, form: 'notice', summary: boundContextSummary(tombstone.summary) },
           })
           if (price !== undefined) {
             session.append('compaction/prune', {
@@ -462,10 +509,10 @@ export function buildAutoRecall(
     // recall commits the marker row instead of a duplicate block (no
     // churn, but the turn still gets its row naming the memories it
     // applied).
-    const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, rules) : text
+    const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, sections) : text
     const appended = createUserMessage({
       content: [{ type: 'text', text: committed }],
-      source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text: committed }] },
+      source: { kind: 'hindsight', bank: config.bank, form: 'snapshot', sections: [{ name: label, text: committed }] },
     })
     return { kind: 'enter', messages: [...decision.messages, appended] }
   }
@@ -481,9 +528,10 @@ export function buildAutoRecall(
    *   recall commits the unchanged-marker row instead of a duplicate
    *   block; an empty recall commits nothing.
    * - `recallPreserve: false`: an identical recall commits nothing; a
-   *   refresh retires the previous full card in place (the shadow-price
-   *   `compaction/prune` pair, exactly as the decision path) and the
-   *   fresh full card is appended directly. A failed retirement degrades
+   *   refresh retires the previous full card OF THIS BANK in place (the
+   *   shadow-price `compaction/prune` pair, exactly as the decision path)
+   *   and the fresh full card is appended directly (a second mount's
+   *   bank keeps its own latest card alongside). A failed retirement degrades
    *   to the append-only path below, so the recall still lands.
    *
    * Every append is try/caught: a refused commit degrades to silence -
@@ -493,12 +541,16 @@ export function buildAutoRecall(
   function commitSnapshotDirect(
     session: Session,
     hits: RecallHit[],
-    rules: DirectiveRule[],
+    sections: RuleSection[],
     durationMs: number,
   ): void {
-    if (hits.length === 0 && rules.length === 0) return
-    const text = rules.length > 0 ? renderSnapshot(config.bank, hits, rules) : renderRecall(config.bank, hits)
-    const retained = findRetainedSnapshots(session)
+    if (hits.length === 0 && sections.every(section => section.rules.length === 0)) return
+    const hasRules = sections.some(section => section.rules.length > 0)
+    const text = hasRules ? renderSnapshot(config.bank, hits, sections) : renderRecall(config.bank, hits)
+    // Retirement scoped to THIS bank (the mount attribution on the message
+    // source; the bank the rendered text names for older cards): a
+    // second mount on the same session keeps its own latest card.
+    const retained = findRetainedSnapshots(session).filter(snapshot => snapshot.bank === config.bank)
     const label = `recall:compact - ${durationMs}ms`
 
     if (!config.recallPreserve) {
@@ -509,7 +561,7 @@ export function buildAutoRecall(
       if (latest !== undefined && latest.text === text) return
       const snapshot = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text }] },
+        source: { kind: 'hindsight', bank: config.bank, form: 'snapshot', sections: [{ name: label, text }] },
       })
       try {
         if (latest !== undefined) {
@@ -521,7 +573,7 @@ export function buildAutoRecall(
           const tombstone = renderTombstone(config.bank)
           const marker = createUserMessage({
             content: [{ type: 'text', text: tombstone.text }],
-            source: { kind: 'hindsight', form: 'notice', summary: boundContextSummary(tombstone.summary) },
+            source: { kind: 'hindsight', bank: config.bank, form: 'notice', summary: boundContextSummary(tombstone.summary) },
           })
           if (price !== undefined) {
             session.append('compaction/prune', {
@@ -544,10 +596,10 @@ export function buildAutoRecall(
       }
     }
 
-    const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, rules) : text
+    const committed = retained.some(snapshot => snapshot.text === text) ? renderUnchanged(config.bank, hits, sections) : text
     const appended = createUserMessage({
       content: [{ type: 'text', text: committed }],
-      source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: label, text: committed }] },
+      source: { kind: 'hindsight', bank: config.bank, form: 'snapshot', sections: [{ name: label, text: committed }] },
     })
     try {
       session.append('user/message', appended, { surfaceOp: 'append' })
@@ -570,12 +622,16 @@ export function buildAutoRecall(
    * queries, so the shared bound would time it out deterministically;
    * sequential: the directives list is cheap, and the bound still covers
    * the total), and the step's signal aborts the pair early when the turn
-   * dies mid-lookup.
+   * dies mid-lookup. The shadow mounts' listings (dual mounting) ride the
+   * same controller, fetched in parallel failure-isolated (a shadow that
+   * fails is simply omitted from the merged snapshot) and merged under
+   * their own banks; only THIS mount's own failure discards the snapshot.
    */
   function syncRecall(
     session: Session,
     query: string,
     signal: AbortSignal,
+    sources: MountRecord[] = [],
     timeoutMs = config.autoContextTimeoutMs,
   ): Promise<PrefetchedTurn | null> {
     return (async (): Promise<PrefetchedTurn | null> => {
@@ -585,12 +641,16 @@ export function buildAutoRecall(
       const onAbort = (): void => controller.abort()
       if (!signal.aborted) signal.addEventListener('abort', onAbort, { once: true })
       try {
+        const shadowRules = sources.map(source =>
+          source.listDirectives(controller.signal, session).catch(() => [] as DirectiveRule[]),
+        )
         const recallPromise = query.length > 0
           ? mount.recall(query, controller.signal, session)
           : Promise.resolve<RecallHit[]>([])
         const hits = await recallPromise
         const rules = await mount.listDirectives(controller.signal, session)
-        return { hits, rules, durationMs: Date.now() - startedAt }
+        const merged = await Promise.all(shadowRules)
+        return { hits, rules: ruleSections(rules, sources, merged), durationMs: Date.now() - startedAt }
       } catch {
         return null
       } finally {
@@ -656,6 +716,7 @@ export function buildAutoRecall(
       content: [{ type: 'text', text: rendered.text }],
       source: {
         kind: 'hindsight',
+        bank: config.bank,
         form: 'notice',
         summary: boundContextSummary(rendered.summary),
       },
@@ -682,6 +743,14 @@ export function buildAutoRecall(
     // task context is owned by the delegating prompt; surfacing bank memory
     // there only dilutes it.
     if (session.header?.origin === 'subagent') return decision
+    // Dual mounting (src/mounts.ts): a session served by its own preset's
+    // mount is owned there - this mount steps back from every automatic
+    // surface for it (no snapshot, no lesson pass; the owner merges this
+    // mount's standing directives into its own snapshot instead). The gate
+    // sits after the subagent skip and before any bank work: a silent
+    // mount consumes nothing and calls nothing.
+    const stance = mountStance(ctx, record, session)
+    if (stance.silent) return decision
     // A later step of a running turn claims the steering delivered at its
     // boundary (an intervention): recall it on the bounded synchronous path
     // anchored on the intervention itself (the loop skips the
@@ -707,7 +776,7 @@ export function buildAutoRecall(
             // responding to), and the anchor's own line is dropped by seq (it
             // is the query's tail, not its context).
             const query = composeRecallQuery(session, anchored.anchor, config.recallContextTurns, true, previous.seq)
-            const result = await syncRecall(session, query, signal)
+            const result = await syncRecall(session, query, signal, stance.directiveSources)
             if (result !== null) return commitSnapshot(decision, session, result.hits, result.rules, result.durationMs, anchored.kind)
             // One bounded recall pass per step: the anchor was attempted and
             // the budget spent, so the action-lesson pass stays out.
@@ -768,7 +837,7 @@ export function buildAutoRecall(
     // The bounded synchronous path (shared with the mid-step branch above):
     // a timed-out, aborted, or failed pair returns without a snapshot, so a
     // committed section name is always real bank latency.
-    const result = await syncRecall(session, query, signal)
+    const result = await syncRecall(session, query, signal, stance.directiveSources)
     if (result === null) return decision
     return commitSnapshot(decision, session, result.hits, result.rules, result.durationMs)
   }
@@ -779,10 +848,14 @@ export function buildAutoRecall(
     // (the synchronous path) instead of reading this turn ahead.
     if (signal.aborted || !config.autoContext || !config.prefetch) return
     if (session.header?.origin === 'subagent') return
+    // Dual mounting (src/mounts.ts): a session owned by its preset's mount
+    // gets no prefetch from this mount - its snapshots are the owner's.
+    const stance = mountStance(ctx, record, session)
+    if (stance.silent) return
     // Never awaited: the event is serial and the loop awaits it before the
     // turn boundary commits — the job runs detached, in the user's think
     // time, and the next step-1 pre-step consumes (or discards) it.
-    startPrefetch(session)
+    startPrefetch(session, stance.directiveSources)
   }
 
   /**
@@ -804,9 +877,14 @@ export function buildAutoRecall(
     if (event.data.error !== undefined) return
     if (!config.autoContext || !config.recallAfterCompaction) return
     if (session.header?.origin === 'subagent') return
+    // Dual mounting (src/mounts.ts): a session owned by its preset's mount
+    // gets no post-compaction recall from this mount - its snapshots are
+    // the owner's.
+    const stance = mountStance(ctx, record, session)
+    if (stance.silent) return
     const latest = queryFromSession(session)
     const query = composeRecallQuery(session, latest, config.recallContextTurns, true)
-    void syncRecall(session, query, new AbortController().signal, config.recallCompactTimeoutMs).then(result => {
+    void syncRecall(session, query, new AbortController().signal, stance.directiveSources, config.recallCompactTimeoutMs).then(result => {
       if (result === null) return
       commitSnapshotDirect(session, result.hits, result.rules, result.durationMs)
     }, () => {
@@ -844,6 +922,10 @@ export function buildAutoRecall(
     if (agent === undefined) return next()
     const session = agent.session
     if (session.header?.origin === 'subagent') return next()
+    // Dual mounting (src/mounts.ts): a session owned by its preset's mount
+    // is gated there - the owner bank's lessons are the session's, and
+    // this mount's gate stays silent for it.
+    if (mountStance(ctx, record, session).silent) return next()
     if (!config.lessonGateTools.includes(exec.name)) return next()
     if (exec.signal.aborted) return next()
     const line = callArgsLine(exec.name, exec.arguments)

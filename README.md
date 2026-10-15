@@ -27,8 +27,9 @@ Then restart the server.
 ## Configuration
 
 The configuration is one `hindsight` row in your own DSH config — never an
-edit to the plugin's files. You place it in one of two spots (pick **one**,
-never both):
+edit to the plugin's files. You place it in one of two spots - or both,
+when the rows serve different banks (the profile-wide bank plus a
+preset-specific bank; see Mounting the plugin twice below):
 
 **Every session.** In your profile's patch layer
 (`~/.dsh/profiles/web/cordis.patch.yml`, append to your existing file):
@@ -66,6 +67,26 @@ Two things to know about the row:
   key);
 - to switch the plugin off again, set `disabled: true` on the row (or
   remove the preset row) and restart.
+
+### Mounting the plugin twice
+
+Two rows can reach one session: the profile-wide row plus an agent-preset
+row, against DIFFERENT banks. The session's PRESET mount then owns its
+automatic recall: every automatic surface (the turn-start snapshot, the
+mid-step recalls, the post-compaction recall, the lesson gate) commits ONE
+snapshot - the preset bank's card - with the profile-wide bank's standing
+directives merged in as their own section (headered by that bank), so the
+profile-wide bank's rules keep reaching the model without a second block
+per turn. The profile-wide row stays silent on every automatic surface for
+that session: no second snapshot, no prefetch, no mid-step or
+post-compaction recall, no gate lookup (its `hindsight` tool stays
+registered, shadowed by the preset row's for that session's agents). A
+session no preset row covers is served by the profile-wide row exactly as
+usual. The merge is failure-isolated per bank: a profile-wide bank whose
+directive listing fails is simply left out of the merge, the preset bank's
+card still lands with its own rules. Mounting twice against the SAME bank
+is redundant: the second mount's refreshes retire the first mount's cards,
+so the surface converges on one bank's cards.
 
 ### The configuration keys
 
@@ -184,7 +205,10 @@ marker stays where that turn's recall fired (so you can always see WHERE
 in the conversation a recall happened, without scrolling), while the
 full note lands as a fresh card at its own turn — only the latest full
 recall stays on the model's surface (the full history of cards remains
-in the session log for replay). The naming matches llama-server's
+in the session log for replay). Retirement is per bank - and when a
+session is dual-mounted against different banks, only its OWNER mount
+commits there (Mounting the plugin twice), so only the owner bank's cards
+can be retired. The naming matches llama-server's
 `--no-reasoning-preserve`: with it off, a turn's snapshot, like its
 reasoning, lives for that turn only. The price is that a retired card
 restarts the model's cached prefix - a mid-step note retires on the same

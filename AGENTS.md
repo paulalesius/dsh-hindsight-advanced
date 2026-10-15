@@ -76,9 +76,13 @@ tree — preserve them when you change anything:
    so the UI still shows exactly what memory was applied that turn; an
    empty recall leaves existing snapshots in place. `recallPreserve:
    false` (the naming mirrors llama-server's `--no-reasoning-preserve`)
-   keeps the surface to the LATEST full snapshot with an in-place
+   keeps the surface to the LATEST full snapshot per bank with an in-place
    record of every earlier recall turn: each new snapshot retires the
-   previously retained full card via a `surfaceOp` replace that installs
+   previously retained full card of its own bank (the mount's bank is
+   recorded on the message source; a card predating that field is
+   attributed from the bank its rendered text names, and a card whose
+   bank is unrecoverable is never a retirement target) via a
+   `surfaceOp` replace that installs
    a TOMBSTONE (`renderTombstone`) in the old slot — a tiny
    `form: 'notice'` one-line marker the UI renders as a collapsed row,
    so every past recall turn keeps a visible marker WHERE it recalled —
@@ -96,7 +100,15 @@ tree — preserve them when you change anything:
    part is the only rewrite the plugin performs, it is the default-off
    behavior the operator opts into, and the fresh full card never
    commits directly (the loop hardcodes `append` on the decision,
-   which is exactly where the card wants to land).
+   which is exactly where the card wants to land). Dual mounting (host
+   row + preset row on one session, different banks) is
+   OWNERSHIP-coordinated (decision 13): for a session a preset mount
+   covers, only the owner mount commits, so only the owner bank's
+   cards can be retired there - the per-bank scoping above is what
+   keeps the shared surface correct for the sessions both mounts
+   still serve (the pre-fix bug: the retirement was bank-agnostic, so
+   each recall buried the other mount's card and got buried back, an
+   alternating recall burst).
 7. **The tool description IS the retention policy.** WHAT and WHEN the model
    stores is decided by the description text in `src/tool.ts` (durable
    facts, preferences, decisions + rationale; never ephemera or raw code).
@@ -207,6 +219,44 @@ tree — preserve them when you change anything:
    bounded bank latency to tool dispatch, which is exactly why it
    ships default-off and behind a tool filter.
 
+13. **Dual-mount ownership: the session's preset row owns its
+   auto-recall.** (The gpu-kernels dual-mount fix: a profile-wide host
+   row and a preset row of this plugin reaching the same session used
+   to auto-recall BOTH - two full snapshots per turn start, on top of
+   the host row's mid-step and post-compaction repeats.) When the
+   session's agent preset has its own mount of this plugin, that mount
+   is the session's OWNER and every other mount applicable to the
+   session (the profile-wide rows) is its SHADOW: every automatic
+   surface (pre-step / mid-step / post-compaction / prefetch / lesson
+   gate) commits at most ONE snapshot per session, rendered by the
+   owner - the owner bank's recall card with every shadowed host
+   bank's standing directives merged in as their own per-bank
+   `RuleSection` (the owner's own bank first) - so the profile-wide
+   banks' standing rules keep reaching the model in the preset's
+   sessions without a second block. The shadowed mount is TOTAL
+   silence on every automatic surface for that session (its lookups
+   never even run); its `hindsight` tool and manual surfaces stay
+   available (the preset row's tool shadows it for that session's
+   agents, as scoped registrations do). Ownership is resolved per
+   session through a shared mount registry on the ROOT context
+   (`src/mounts.ts`): preset mounts filed under their preset id, host
+   mounts under one shared symbol, each record carrying its bank + a
+   `listDirectives` closure; array values for a transient
+   two-generation coexistence; the registration is effect-disposed, so
+   a superseded preset generation stops shadowing its bank the moment
+   it dies and the host row resumes the session (full behavior, no
+   merge). A session no preset mount covers is served by every
+   applicable mount as before, with nothing merged - the
+   pre-coordination behavior (a preset row for ANOTHER preset is still
+   silent there: its scoped listeners never admit the session, and the
+   stance gates the listener anyway). The owner merges exactly the
+   host-keyed records, never itself (an owner is always preset-keyed,
+   so self-merge is impossible by construction); each shadow source is
+   fetched failure-isolated (a failed directive listing is merged away
+   as an empty section) - the owner snapshot always lands. The
+   retirement machinery (decision 6) is untouched: the shadow never
+   commits, so there is nothing for it to retire.
+
 ## Layout
 
 | file | role |
@@ -216,8 +266,9 @@ tree — preserve them when you change anything:
 | `src/tiers.ts` | the visibility-tier (tag) model: `MEMORY_SCOPES`, `sessionTierId`, `scopeTags`, `recallTags` |
 | `src/config.ts` | `ResolvedConfig` + the hand-rolled Standard-Schema v1 `Config` validator |
 | `src/client.ts` | the REST transport: one bounded call, one clean bounded error shape |
-| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`read`/`invalidate`/`listDirectives`/`retainDirective`/`lessonRecall` operations — **the extension point for new Hindsight operations** |
-| `src/snapshot.ts` | auto-recall surface logic: query derivation (from the step's messages, from the step's HUMAN message only for an intervention step (plugin-injected context is never an anchor), and from the session's durable log for the turn-stop prefetch — human `user/message` events only, so plugin snapshots are never queries) + the multi-turn composition (`composeRecallQuery`: the anchor under a `Prior context:` block of the last `recallContextTurns` prior human turns, one line per message, capped with oldest-first truncation), hit + standing-rules rendering (curatable hits carry their ids; an observation hit carries NO id of its own — it is derived and the bank refuses to curate it, so its id would render as the handle for exactly the call that 400s — with its source facts under it on `from:` lines — ids ONLY, no fact text (the consolidated observation supersedes its sources, so re-rendering their text would only duplicate the recall context), each the only curatable handle), the unchanged-recall marker (the applied memories, one compact line each), and the retained-snapshot lookup (an unchanged recall commits the marker instead of a duplicate block) + the mid-step anchor (`midStepAnchor`: the previous step's committed text and/or reasoning blocks, capped at 600 / 400 chars per kind, composed reasoning-first then text when both keys are on) + `previousStepAssistant` (the durable log's committed assistant message for (turn, step-1), the mid-step anchor's source) + `composeRecallQuery`'s optional `dropSeq` (the mid-step anchor is already on the log, so its own context line is dropped; the prefetch and intervention semantics are unchanged) + the
+| `src/bank.ts` | `createMount`: the per-mount factory (owns the lazy bank-config sync) and the `retain`/`recall`/`reflect`/`read`/`invalidate`/`listDirectives` (the listing's tier filter runs CLIENT-side: the directives endpoint's `tags` query parameter takes one literal tag, not recall's two-tag tier list, so the listing is fetched unfiltered - every active directive - and reduced to the session's visible tiers, which the recall's POST-body tags do not have because the POST body takes a JSON array)/`retainDirective`/`lessonRecall` operations — **the extension point for new Hindsight operations** |
+| `src/mounts.ts` | the dual-mount registry (decision 13): the shared mount map on the root context (preset mounts keyed by their preset id, host mounts under the shared `dsh-plugin-hindsight-advanced.host-mount` symbol; records carry the mount's bank + a `listDirectives` closure; array values for a transient two-generation coexistence), `presetIdOf(ctx)` (the scope key's agent preset id; a preset row applied unscoped degrades to a host registration rather than failing to mount), `registerMount` (the effect-disposed registration; the disposer removes the record and deletes an emptied key outright), and `mountStance(ctx, self, session)` (the stance every automatic surface asks first: a session no preset header covers is served by every applicable mount (no merge); a session a preset mount covers is served only by that preset's mounts - the owner passes with the host records as its merged directive sources, every other mount is total silence) |
+| `src/snapshot.ts` | auto-recall surface logic: query derivation (from the step's messages, from the step's HUMAN message only for an intervention step (plugin-injected context is never an anchor), and from the session's durable log for the turn-stop prefetch — human `user/message` events only, so plugin snapshots are never queries) + the multi-turn composition (`composeRecallQuery`: the anchor under a `Prior context:` block of the last `recallContextTurns` prior human turns, one line per message, capped with oldest-first truncation), hit + standing-rules rendering (curatable hits carry their ids; an observation hit carries NO id of its own — it is derived and the bank refuses to curate it, so its id would render as the handle for exactly the call that 400s — with its source facts under it on `from:` lines — ids ONLY, no fact text (the consolidated observation supersedes its sources, so re-rendering their text would only duplicate the recall context), each the only curatable handle), the unchanged-recall marker (the applied memories, one compact line each), and the retained-snapshot lookup (every retained card carries its bank - the mount attribution on the message source, or the bank the rendered text names for a card predating that field, and a card whose bank is unrecoverable is never a retirement target - so the caller scopes its unchanged-recall and retirement comparisons to its own bank; an unchanged recall commits the marker instead of a duplicate block) + the mid-step anchor (`midStepAnchor`: the previous step's committed text and/or reasoning blocks, capped at 600 / 400 chars per kind, composed reasoning-first then text when both keys are on) + `previousStepAssistant` (the durable log's committed assistant message for (turn, step-1), the mid-step anchor's source) + `composeRecallQuery`'s optional `dropSeq` (the mid-step anchor is already on the log, so its own context line is dropped; the prefetch and intervention semantics are unchanged) + the
 failure-lesson surface (`lessonAnchor` + `toolCallLine`: the previous
 step's committed tool-call blocks as one line per call - `bash:
 <command>` / `name key=value` - capped at 500 chars) and its rendering
@@ -229,14 +280,14 @@ the PENDING call's own line - `bash: <command>` capped at 300 chars,
 header, at most `GATE_DENIAL_LINES` (3) lesson lines at 240 chars each
 with their match score and id) |
 | `src/tool.ts` | the model-facing `hindsight` tool (the description IS the retention policy) |
-| `src/autorecall.ts` | the auto-recall listeners: the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup; a later step's HUMAN intervention anchors its own bounded synchronous lookup on the claimed steer; a later step whose claim carries NO human message takes the same bounded synchronous path when `recallAfterText` / `recallAfterReasoning` are on, anchored on the previous step's committed blocks and labeled by the anchor kind - the `syncRecall` helper (recall, then listDirectives, one combined bound: `autoContextTimeoutMs` on the loop-blocking paths, `recallCompactTimeoutMs` on the detached post-compaction path) shared by both synchronous paths) + the `actionLessons`
+| `src/autorecall.ts` | the auto-recall listeners (every automatic surface first asks the mount's STANCE - decision 13: a shadowed mount is total silence for a session a preset mount owns, the owner passes with its merged host-bank directive sources): the `agent/turn-stopping` prefetch (detached recall job — at most one live slot per session, hard 120 s TTL mirroring the Hermes op timeout), the `agent/pre-step` consumer (cached result if ready, else the original bounded synchronous lookup; a later step's HUMAN intervention anchors its own bounded synchronous lookup on the claimed steer; a later step whose claim carries NO human message takes the same bounded synchronous path when `recallAfterText` / `recallAfterReasoning` are on, anchored on the previous step's committed blocks and labeled by the anchor kind - the `syncRecall` helper (recall, then the standing-directive listings - own bank plus merged shadow banks, each source failure-isolated - one combined bound: `autoContextTimeoutMs` on the loop-blocking paths, `recallCompactTimeoutMs` on the detached post-compaction path) shared by both synchronous paths) + the `actionLessons`
 failure-lesson pass (the previous step's committed tool calls anchor a
 bounded `experience`-only recall; a match commits a `form: 'notice'`
 row directly via `session.append`, de-duplicated per turn by memory id)
 + the `session/event` post-compaction recall (`recallAfterCompaction`: a successful `compaction/end` - `error === undefined` - commits its snapshot DIRECTLY to the surface through `commitSnapshotDirect` on its own `recallCompactTimeoutMs` bound (the same `recallPreserve` machinery without a decision; subagent sessions skipped)) + the `tools/pre-execute` lesson gate (`lessonGate`: the pending call anchors an `experience`-only recall on itself; a hit at or above `lessonGateMinScore` returns `deny` with the rendered lessons as the reason - a separate surface, no commit, no de-duplication; subagent sessions skipped) + surface commit, and `agent/disposed` cleanup |
 | `package.json` | the package manifest; `dsh.bundle: { patch: "./cordis.patch.yml" }` makes this a profile bundle |
 | `cordis.patch.yml` | the bundle's patch layer — the host-plane mounting row (`id: hindsight`, **shipped `disabled: true`**) and its `config` (the README documents the keys) |
-| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 66 checks, fifteen mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot retiring the previous full card in place — a `form: 'notice'` tombstone marker in the old slot, shadow-priced by the adjacent log-only `compaction/prune` (old card's full price), while the full new card lands fresh after the triggering message on the decision (the durable log keeping both full snapshots) — an unchanged recall committing nothing, a refused retirement degrading to the append path with the orphaned price harmless, the twelfth the mid-step agent-output recall (`recallAfterText` / `recallAfterReasoning`): a no-human mid-step anchoring the recall on the previous step's committed text (the row labeled `recall:text`, the anchor's own context line dropped, the current turn's human line kept), a reasoning anchor (`recall:think`, the reasoning-only assistant message contributing no context line), both keys composing ONE anchor (reasoning first, then text, ONE recall, labeled `recall:think+text`), the steering claim winning the precedence over the anchor (the intervention path, plain label), a reasoning-only previous step anchoring nothing (pass-through, no bank call), the default-off keys leaving a no-human mid-step untouched, subagent steps staying silent at every step, and the `recallPreserve: false` interplay (the mid-step snapshot retiring the previous full card in place - tombstone + adjacent shadow price, the full card riding the decision with an empty claim; an unchanged mid-step recall a pure no-op, the lookup still ran,
+| `test/stub-server.mjs`, `test/test.mjs` | dependency-free smoke suite (stub Hindsight server, 79 checks, seventeen mounts — the fifth covers the visibility tiers, the sixth the standing directives, the seventh the recall provenance, the eighth memory invalidation plus the `read` action: read resolves an id to its text and type (a fact: its own line; an observation: its backing facts WITH their text — unlike recall's ids-only from line; an unknown id: the same bounded 404), and derived-observation curation: the observation renders no id of its own, invalidating one (an id the model can still hold from an earlier snapshot) is refused by the bank and surfaced as an actionable pointer to the backing fact, and only the backing fact on the `from:` line is curatable, the ninth the turn-stop prefetch: cached consumption without a bank call, the job querying the turn's own human message, an unchanged recall committing the marker row, too-slow discard, failed-job fallback, subagent skip, the `prefetch: false` gate, disposal cleanup, the tenth the multi-turn query: the anchor under a `Prior context:` block on both paths (the sync anchor not on the log yet; the prefetch anchor's own line dropped, its reply kept), oldest-first truncation at the cap, `recallContextTurns: 1` as the single-message query, the eleventh `recallPreserve: false`: the first snapshot a plain append committed directly (on the surface before the triggering message, never riding the decision), a new snapshot retiring the previous full card in place — a `form: 'notice'` tombstone marker in the old slot, shadow-priced by the adjacent log-only `compaction/prune` (old card's full price), while the full new card lands fresh after the triggering message on the decision (the durable log keeping both full snapshots) — an unchanged recall committing nothing, a refused retirement degrading to the append path with the orphaned price harmless, the twelfth the mid-step agent-output recall (`recallAfterText` / `recallAfterReasoning`): a no-human mid-step anchoring the recall on the previous step's committed text (the row labeled `recall:text`, the anchor's own context line dropped, the current turn's human line kept), a reasoning anchor (`recall:think`, the reasoning-only assistant message contributing no context line), both keys composing ONE anchor (reasoning first, then text, ONE recall, labeled `recall:think+text`), the steering claim winning the precedence over the anchor (the intervention path, plain label), a reasoning-only previous step anchoring nothing (pass-through, no bank call), the default-off keys leaving a no-human mid-step untouched, subagent steps staying silent at every step, and the `recallPreserve: false` interplay (the mid-step snapshot retiring the previous full card in place - tombstone + adjacent shadow price, the full card riding the decision with an empty claim; an unchanged mid-step recall a pure no-op, the lookup still ran,
 nothing committed), the thirteenth the failure-lesson pass
 (`actionLessons`): a no-human mid-step anchoring the recall on the
 previous step's committed TOOL CALLS (tool-call lines `bash:
@@ -272,9 +323,35 @@ default `lessonGateTools`, tools outside the filter passing with no
 lookup, a timeout allowing the call (failure isolation), subagent
 sessions staying silent, unanchored (non-object) arguments passing
 with no lookup, and the default-off key delegating to next() with no
-bank call
+bank call, and the sixteenth the dual-mount `recallPreserve: false`
+(two mounts on one shared session surface, different banks):
+retirement scoped to the mounting bank (a refresh retires only its
+own bank's latest card, the other bank's card lands side by side and
+stays untouched; each tombstone attributed to the retiring mount's
+bank, shadow-priced as before), a legacy card predating the bank field
+on the message source attributed from the bank its rendered text names
+(retired by its own bank), and the seventeenth dual-mount ownership
+(a profile-wide row and a preset row reaching one session, the preset
+applied under a real `createScope` standing scope): the preset mount
+owns the session's auto-recall - ONE snapshot per turn start (the
+owner bank's card with the shadowed host bank's standing directives
+merged in as their own per-bank section; one owner recall, the host
+mount making zero bank calls), the host row silent on every automatic
+surface for that session (no mid-step / prefetch / post-compaction /
+gate lookup), the owner's own surfaces intact (its prefetch runs for
+the owned session and merges the host directives into the cached
+result - the unchanged recall committing the marker row with the rules
+still in effect; its gate denying from the owner bank's lessons; its
+post-compaction recall committing the `recall:compact` snapshot
+alone), a no-preset session keeping the host row's full behavior (the
+host card without any kernel bank section or rule), a dead preset
+generation unregistering its record so the host row resumes the
+session (host rules only, no merge), and a failing shadow directive
+listing merged away (the owner card still lands with its own rules),
+and the final surface holding exactly one
+latest full card per bank
 |
-| `test/live.mjs` | live round-trip against a real Hindsight server on a scratch bank (self-cleaning) |
+| `test/live.mjs` | live round-trip against a real Hindsight server on scratch banks (self-cleaning, including the dual-mount ownership round-trip: one snapshot per turn start for a preset-owned session with the host bank's standing directives merged in, the host mount silent on every automatic surface, the post-compaction snapshot the owner's alone, and a no-preset session served by the host row unchanged) |
 | `test/register.mjs`, `test/hooks.mjs` | tsx loader bootstrap so `node` can import the `.ts` plugin in tests |
 | `misc/banner.jpg` | the README banner |
 
@@ -291,10 +368,10 @@ TSC="$(cd "$(realpath node_modules)/../../.." && pwd)/node_modules/.bin/tsc"
   --module nodenext --target es2023 --allowImportingTsExtensions \
   --skipLibCheck hindsight-advanced.ts
 
-# the stub suite (66 checks)
+# the stub suite (79 checks)
 cd test && node --import ./register.mjs test.mjs
 
-# preset-mount verification (the custom agent preset row)
+# preset-mount verification (the kernel-dev agent preset row)
 node test/verify-preset.mjs
 
 # live round-trip (real server, scratch bank; the key from the env, same
@@ -343,8 +420,9 @@ HINDSIGHT_API_KEY=<key> node --import ./register.mjs live.mjs
   prefixes, and the preset row `id`; the package/plugin is
   `dsh-plugin-hindsight-advanced` (the bare name stays reserved).
 - Snapshots are append-only UNLESS the operator sets `recallPreserve:
-  false` — then the surface carries only the latest FULL snapshot: each
-  new one retires the previous full card in place (a `form: 'notice'`
+  false` — then the surface carries only the latest FULL snapshot per
+  bank: each new one retires the previous full card of its own bank in
+  place (a `form: 'notice'`
   tombstone in the old slot, shadow-priced by an adjacent log-only
   `compaction/prune`) and lands fresh at its own turn on the decision,
   and the durable log still keeps every full snapshot (tombstones never
@@ -361,4 +439,15 @@ HINDSIGHT_API_KEY=<key> node --import ./register.mjs live.mjs
 - The bank-config sync is a lazy one-time `PATCH` that rides the next
   operation's signal and never blocks or fails it.
 - The shipped bundle row stays `disabled: true` — activation is always the
-  user's declarative act, and never host row + preset row at once.
+  user's declarative act. Dual mounting (host row + preset row at once)
+  is OWNERSHIP-coordinated (decision 13): for a session a preset mount
+  covers, the PRESET mount owns its auto-recall - one snapshot per
+  automatic surface (the owner bank's card, with the shadowed host
+  banks' standing directives merged in as their own per-bank sections,
+  failure-isolated per bank) and the host row silent on every
+  automatic surface for that session; a session no preset mount covers
+  is served by both rows as before; the shared registry is
+  effect-disposed, so a dead preset generation ends its ownership and
+  the host row resumes. Per-bank retirement keeps the shared surface
+  correct. A second mount on the SAME bank is redundant; its
+  refreshes retire the first mount's cards (same-bank convergence).

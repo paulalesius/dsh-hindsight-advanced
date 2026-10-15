@@ -179,7 +179,10 @@ const server = http.createServer((req, res) => {
     }
     if (req.method === 'GET' && rest[0] === 'directives') {
       // list active directives; like recall, untagged (global) directives are
-      // included in every mode, and a tag filter selects matching tiers
+      // included in every mode, and a tag filter selects matching tiers. The
+      // 'no-dir' bank always fails the listing (the dual-mount directive
+      // merge's failure-isolation check).
+      if (bank === 'no-dir') return json(500, { error: 'stub: no-dir bank' })
       let items = state.directives.filter(directive => directive.bank === bank && directive.is_active !== false)
       const tagsParam = url.searchParams.get('tags')
       if (tagsParam !== null && tagsParam.length > 0) {

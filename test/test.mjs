@@ -23,12 +23,16 @@
 // and the automatic pre-step recall: with recallPreserve (default) the
 // snapshot rows ride the pre-step decision (landing AFTER the triggering
 // message) and are only ever appended; with recallPreserve: false the
-// surface carries only the LATEST full snapshot — each new one retires
-// the previous full card in place (a tiny `form: 'notice'` tombstone
-// marker at the old turn, shadow-priced by an adjacent log-only
-// compaction/prune) and lands fresh as a full card at its own turn (the
-// durable log keeps every full snapshot; an unchanged recall commits
-// nothing — the snapshot is already current);
+// surface carries only the LATEST full snapshot per bank — each new one
+// retires the previous full card of its own bank in place (a tiny
+// `form: 'notice'` tombstone marker at the old turn, shadow-priced by
+// an adjacent log-only compaction/prune) and lands fresh as a full card
+// at its own turn (the durable log keeps every full snapshot; an
+// unchanged recall commits nothing — the snapshot is already current;
+// mount P: a second mount on the same session, a different bank, keeps
+// its own latest card alongside, and a card predating the bank field on
+// the message source is attributed from the bank its rendered text
+// names);
 // in preserve mode an identical recall commits a marker row — naming the
 // applied memories one compact line each — instead of a duplicate block,
 // so every applied recall has a visible row.
@@ -57,7 +61,18 @@
 // recall on the call itself; a hit at or above lessonGateMinScore DENIES
 // the call before the tool body runs (the rendered lessons travel in the
 // reason), a sub-threshold hit allows, and a timeout / unanchored call /
-// subagent session / non-gated tool passes with no bank call at all.
+// subagent session / non-gated tool passes with no bank call at all;
+// plus dual-mount ownership (mount seventeen: a profile-wide row and a
+// preset row both reaching one session - the session's PRESET mount
+// owns its auto-recall: one snapshot per turn start, the owner bank's
+// card with the shadowed host bank's standing directives merged in as
+// their own per-bank section, while the host row stays silent on every
+// automatic surface for that session (no snapshot, no prefetch, no
+// mid-step or post-compaction recall, no gate lookup); a session no
+// preset mount covers keeps the host row's full behavior; a failing
+// shadow directive listing is merged away (the snapshot still lands);
+// and disposing the preset generation ends its ownership, the host row
+// resuming the session).
 import assert from 'node:assert/strict'
 import { start, state } from './stub-server.mjs'
 
@@ -226,8 +241,15 @@ console.log('ok  Config validator (required bank, defaults, trimming, issues)')
 // ── a minimal plugin context ────────────────────────────────────────────────
 // `extra` stands in for seam services the plugin may read with ctx.get
 // (e.g. a credentials stub); everything else reads as unprovided.
-function makeCtx(extra = {}) {
-  return {
+// `root` stands in for the app's root context: every context of one
+// runtime inherits it (cordis's Context.root), so cross-runtime-registry
+// state lives on the shared object the fakes pass around. `plugin`/`extend`
+// mirror cordis's standing-scope fiber shape (Object.create keeps the
+// API and root on the prototype chain, exactly like Context.extend), and
+// `effect` runs the body immediately, keeping the returned disposer on the
+// calling context's own effectDisposers (a fiber disposal runs them).
+function makeCtx(extra = {}, root) {
+  const ctx = {
     tools: {
       registered: [],
       register(tool) { this.registered.push(tool) },
@@ -235,7 +257,29 @@ function makeCtx(extra = {}) {
     listeners: [],
     on(event, fn, options) { this.listeners.push({ event, fn, options }) },
     get(name) { return extra[name] },
+    root: root ?? Object.create(null),
+    effectDisposers: [],
+    plugin() {
+      const child = Object.create(this)
+      child.listeners = []
+      child.effectDisposers = []
+      return { ctx: child, dispose: async () => {} }
+    },
+    extend(meta) {
+      const child = Object.create(this)
+      child.listeners = []
+      child.effectDisposers = []
+      for (const key of Reflect.ownKeys(meta)) {
+        Object.defineProperty(child, key, Reflect.getOwnPropertyDescriptor(meta, key))
+      }
+      return child
+    },
+    effect(fn) {
+      const disposer = fn()
+      if (disposer !== undefined) this.effectDisposers.push(disposer)
+    },
   }
+  return ctx
 }
 
 // Minimal Session stand-in: the plugin reads events, surface.nodes, and
@@ -774,13 +818,15 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
     /name/,
   )
 
-  // the pre-step listing is tier-scoped like recall; same preset sees the
-  // preset rule + the global one
+  // the pre-step listing is tier-scoped like recall; the tier filter runs
+  // client-side (the server's `tags` parameter takes one literal tag, not
+  // the two-tag tier list), so the listing is fetched unfiltered and
+  // reduced to the session's visible tiers; same preset sees the preset
+  // rule + the global one
   await runStep(listener, alice, 1, [userMsg('what formatting rule applies here?')])
   const rulesReq = state.requests.filter(request => request.path === '/v1/default/banks/rules/directives').at(-1)
   assert.ok(rulesReq.query.includes('active_only=true'))
-  assert.ok(rulesReq.query.includes(`${encodeURIComponent('session:sess-r1')},${encodeURIComponent('preset:standard')}`),
-    'the listing carries the session tier tags')
+  assert.ok(!rulesReq.query.includes('tags='), 'the listing fetches unfiltered (the tier filter is client-side)')
   const aliceSnap = snapshots(alice.session).at(-1).data.content[0].text
   assert.match(aliceSnap, /Standing rules from the Hindsight bank "rules"/)
   assert.match(aliceSnap, /Always use tabs in this project/)
@@ -1953,6 +1999,342 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   console.log('ok  mount O: unanchored arguments pass without a lookup')
 }
 
+// ── mount P: recallPreserve: false on TWO mounts, one session — retirement is per-bank ──
+{
+  // The sanctioned dual-mount deployment: a host row and a preset row on
+  // the same session, different banks, one shared surface. Under
+  // recallPreserve: false each mount keeps its own LATEST full card, so a
+  // refresh must never retire the other mount's snapshot (the pre-fix
+  // burst: each recall buried the other bank's card, and got buried back).
+  // A legacy card predating the bank field on the message source is
+  // attributed from the bank its rendered text names.
+  const ctx = makeCtx({ tokenMeter: { estimateMessage: () => 7 } })
+  plugin.apply(ctx, {
+    ...standard.value,
+    baseUrl: stubUrl,
+    bank: 'perbank-a',
+    recallPreserve: false,
+    recallContextTurns: 1,
+    prefetch: false,
+  })
+  plugin.apply(ctx, {
+    ...standard.value,
+    baseUrl: stubUrl,
+    bank: 'perbank-b',
+    recallPreserve: false,
+    recallContextTurns: 1,
+    prefetch: false,
+  })
+  // each apply registers pre-step / turn-stopping / session-event /
+  // pre-execute / disposed in order: mount A's pre-step is listener 0,
+  // mount B's listener 5
+  const listenerA = ctx.listeners[0].fn
+  const listenerB = ctx.listeners[5].fn
+  const toolA = ctx.tools.registered[0]
+  const toolB = ctx.tools.registered[1]
+  const pal = { session: makeSession('sess-p') }
+
+  // Disjoint vocabularies per bank and per recall state: each query hits
+  // exactly one memory, never the other.
+  await toolA.execute({ action: 'retain', text: 'The verdant probe mounts on the north rail.' }, { signal: baseSignal })
+  await toolA.execute({ action: 'retain', text: 'The crimson gauge reads the south rail.' }, { signal: baseSignal })
+  await toolB.execute({ action: 'retain', text: 'The zephyr relay rides the north tower.' }, { signal: baseSignal })
+  await toolB.execute({ action: 'retain', text: 'The quartz filament weaves the south loom.' }, { signal: baseSignal })
+
+  // A legacy card: an A-bank snapshot from a session resumed across a
+  // plugin upgrade. Its source carries no bank field (predating the
+  // attribution); only the rendered text names the bank.
+  const legacyText = 'Relevant memories from the Hindsight bank "perbank-a":\n- the brass gear turns clockwise on the second shaft.'
+  const legacy = pal.session.append('user/message', {
+    id: 'legacy-p',
+    role: 'user',
+    content: [{ type: 'text', text: legacyText }],
+    source: { kind: 'hindsight', form: 'snapshot', sections: [{ name: 'recall - 3ms', text: legacyText }] },
+  }, { surfaceOp: 'append' })
+
+  // Turn 1, mount A: the legacy card is A's latest on the surface, so A's
+  // first refresh retires it (attributed from its text, not a field),
+  // shadow-priced, and the fresh card rides the decision.
+  const d1 = await runStep(listenerA, pal, 1, [userMsg('where does the verdant probe mount?')])
+  assert.equal(d1.messages.length, 2, 'A: the fresh full card rides the decision; the retirement commits directly')
+  let tombstones = pal.session.events.filter(event => event.type === 'user/message' && event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice')
+  assert.equal(tombstones.length, 1, 'one tombstone for the legacy card')
+  const tomb1 = tombstones[0]
+  assert.deepEqual(tomb1.surfaceOp, { op: 'replace', startSeq: legacy.seq, endSeq: legacy.seq }, 'the tombstone takes the legacy card\'s slot')
+  assert.deepEqual(tomb1.sourceEventSeqs, [legacy.seq], 'the replace cites the shadowed node')
+  assert.equal(tomb1.data.source.bank, 'perbank-a', 'the retiring mount attributes the marker to its own bank')
+  assert.match(tomb1.data.content[0].text, /perbank-a/, 'the tombstone names its own bank')
+  assert.ok(!onSurface(pal.session, legacy), 'the legacy card is off the surface')
+  let snapsA = pal.session.events.filter(event => event.data.source?.bank === 'perbank-a' && event.data.source.form === 'snapshot')
+  assert.equal(snapsA.length, 1)
+  assert.ok(onSurface(pal.session, snapsA[0]), 'A: the fresh card is on the surface')
+  assert.match(snapsA[0].data.content[0].text, /Hindsight bank "perbank-a"/, 'the card names its own bank')
+  assert.match(snapsA[0].data.content[0].text, /verdant probe/, 'A: the card carries its own bank\'s hit')
+  assert.equal(pal.session.events.filter(event => event.type === 'compaction/prune').length, 1, 'the legacy retirement is shadow-priced')
+  console.log('ok  mount P: a legacy card (no bank field) is attributed from its rendered text and retired by its own bank')
+
+  // Turn 2, mount B: B's first snapshot is a direct append, and it must
+  // NOT retire A's card: the other mount's bank is not B's to bury.
+  const d2 = await runStep(listenerB, pal, 1, [userMsg('where does the zephyr relay tower stand?')])
+  assert.equal(d2.messages.length, 1, 'B: the first snapshot commits directly, never riding the decision')
+  let snapsB = pal.session.events.filter(event => event.data.source?.bank === 'perbank-b' && event.data.source.form === 'snapshot')
+  assert.equal(snapsB.length, 1)
+  assert.ok(onSurface(pal.session, snapsB[0]), 'B: the fresh card is on the surface')
+  assert.ok(onSurface(pal.session, snapsA[0]), 'A: its card survives B\'s recall (no cross-bank retirement)')
+  assert.equal(pal.session.events.filter(event => event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice').length, 1, 'no second tombstone for B\'s first card')
+  assert.equal(pal.session.events.filter(event => event.type === 'compaction/prune').length, 1, 'no second shadow price either')
+  assert.equal(pal.session.surface.nodes.length, 5, 'tombstone, A card, A message, B card, B message (both banks\' cards side by side)')
+  console.log('ok  mount P: a recall never retires the other bank\'s card (the two snapshots land side by side)')
+
+  // Turn 3, mount A: a different recall retires A's OWN latest card only;
+  // B's card stays exactly where it landed.
+  const d3 = await runStep(listenerA, pal, 1, [userMsg('where does the crimson gauge read?')])
+  assert.equal(d3.messages.length, 2, 'A: the fresh full card rides the decision')
+  snapsA = pal.session.events.filter(event => event.data.source?.bank === 'perbank-a' && event.data.source.form === 'snapshot')
+  assert.equal(snapsA.length, 2, 'the durable log keeps A\'s both full snapshots')
+  assert.ok(!onSurface(pal.session, snapsA[0]), 'A: its previous card is retired')
+  assert.ok(onSurface(pal.session, snapsA[1]), 'A: its fresh card is on the surface')
+  assert.match(snapsA[1].data.content[0].text, /crimson gauge/, 'A: the fresh card carries its own bank\'s hit')
+  assert.ok(onSurface(pal.session, snapsB[0]), 'B: its card survives A\'s refresh (no cross-bank retirement)')
+  const tomb2 = pal.session.events.filter(event => event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice')[1]
+  assert.deepEqual(tomb2.sourceEventSeqs, [snapsA[0].seq], 'the retirement targets A\'s own card')
+  assert.equal(tomb2.data.source.bank, 'perbank-a', 'the marker is attributed to the retiring mount\'s bank')
+  console.log('ok  mount P: a refresh retires only the mounting bank\'s latest card (the other bank\'s card stays)')
+
+  // Turn 4, mount B: mirrored. B retires its own first card; A's current
+  // card is untouched. The surface now holds exactly the two latest full
+  // cards, one per bank, plus the three in-place tombstones.
+  const d4 = await runStep(listenerB, pal, 1, [userMsg('where does the quartz filament weave?')])
+  assert.equal(d4.messages.length, 2, 'B: the fresh full card rides the decision')
+  snapsB = pal.session.events.filter(event => event.data.source?.bank === 'perbank-b' && event.data.source.form === 'snapshot')
+  assert.equal(snapsB.length, 2)
+  assert.ok(!onSurface(pal.session, snapsB[0]), 'B: its previous card is retired')
+  assert.ok(onSurface(pal.session, snapsB[1]), 'B: its fresh card is on the surface')
+  assert.match(snapsB[1].data.content[0].text, /quartz filament/, 'B: the fresh card carries its own bank\'s hit')
+  assert.ok(onSurface(pal.session, snapsA[1]), 'A: its current card survives B\'s refresh')
+  const tomb3 = pal.session.events.filter(event => event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice')[2]
+  assert.deepEqual(tomb3.sourceEventSeqs, [snapsB[0].seq], 'the retirement targets B\'s own card')
+  assert.equal(tomb3.data.source.bank, 'perbank-b')
+  assert.equal(pal.session.events.filter(event => event.type === 'compaction/prune').length, 3, 'three shadow prices for three retirements')
+
+  // End state: one full card per bank on the surface, nothing cross-bank
+  // ever buried.
+  const surfaceSnaps = derivedSnapshots(pal.session)
+  assert.equal(surfaceSnaps.length, 2, 'the surface carries one full card per bank')
+  assert.deepEqual(surfaceSnaps.map(message => message.source.bank).sort(), ['perbank-a', 'perbank-b'])
+  const surfaceTombstones = pal.session.surface.nodes.map(seq => pal.session.events[seq - 1]).filter(event => event.data.source?.kind === 'hindsight' && event.data.source.form === 'notice')
+  assert.equal(surfaceTombstones.length, 3)
+  assert.deepEqual(surfaceTombstones.map(event => event.data.source.bank).sort(), ['perbank-a', 'perbank-a', 'perbank-b'])
+  const bankRecalls = (bank) => state.requests.filter(request => request.path === `/v1/default/banks/${bank}/memories/recall`)
+  assert.equal(bankRecalls('perbank-a').length, 2, 'A recalled twice (turns 1 and 3), on its own bank only')
+  assert.equal(bankRecalls('perbank-b').length, 2, 'B recalled twice (turns 2 and 4), on its own bank only')
+  console.log('ok  mount P: the dual-mount surface holds the latest full card per bank (complementary snapshots, no cross-bank churn)')
+}
+
+// ── mount seventeen: dual-mount ownership - the preset row owns the session's auto-recall ──
+{
+  // The gpu-kernels shape: a profile-wide row (bank owner-host) and a
+  // preset row (bank owner-kernel) both reach a kernel-dev session. The
+  // preset's mount is the session's OWNER: one snapshot per turn start
+  // (the owner bank's card, the shadowed host bank's standing directives
+  // merged in as their own section), and the host mount stays silent on
+  // every automatic surface for that session - no second snapshot, no
+  // prefetch, no mid-step or post-compaction recall, no lesson gate. A
+  // session no preset mount covers is served by both mounts as before;
+  // a shadow bank whose directive listing fails is simply omitted from
+  // the merge; disposing the preset generation ends its ownership and
+  // the host row resumes.
+  const { createScope } = await import('@deepseek-ai/dsh-scope')
+  const hostCtx = makeCtx({ tokenMeter: { estimateMessage: () => 7 } })
+  plugin.apply(hostCtx, {
+    ...standard.value,
+    baseUrl: stubUrl,
+    bank: 'owner-host',
+    recallContextTurns: 1,
+    prefetch: true,
+    recallAfterCompaction: true,
+    actionLessons: true,
+    lessonGate: true,
+  })
+  // The preset row applies under its preset's standing scope: the real
+  // createScope mints the scope fiber and tags the scoped context with
+  // the scope key carrying the agent preset id (the same wiring the
+  // real preset-plane apply takes; the scoped context inherits the host
+  // context's root, where the shared registry lives).
+  const kernelScope = createScope(hostCtx, { agentPreset: 'kernel-dev' })
+  const presetCtx = kernelScope.ctx
+  plugin.apply(presetCtx, {
+    ...standard.value,
+    baseUrl: stubUrl,
+    bank: 'owner-kernel',
+    recallContextTurns: 1,
+    prefetch: true,
+    recallAfterCompaction: true,
+    actionLessons: true,
+    lessonGate: true,
+  })
+  const hostPreStep = hostCtx.listeners[0].fn
+  const hostTurnStopping = hostCtx.listeners[1].fn
+  const hostSessionEvent = hostCtx.listeners[2].fn
+  const hostGate = hostCtx.listeners[3].fn
+  const hostTool = hostCtx.tools.registered[0]
+  const presetPreStep = presetCtx.listeners[0].fn
+  const presetTurnStopping = presetCtx.listeners[1].fn
+  const presetSessionEvent = presetCtx.listeners[2].fn
+  const presetGate = presetCtx.listeners[3].fn
+  // The fake's tools registry is inherited along the context chain, so
+  // BOTH applies appended to the host context's array: each apply
+  // registers exactly one tool, index them in apply order.
+  const presetTool = presetCtx.tools.registered[1]
+
+  // The shared registry (root level): the host row under the host key,
+  // the preset row under its preset id.
+  const registry = hostCtx.root[Symbol.for('dsh-plugin-hindsight-advanced.mounts')]
+  assert.deepEqual(registry.get(Symbol.for('dsh-plugin-hindsight-advanced.host-mount')).map(record => record.bank), ['owner-host'])
+  assert.deepEqual(registry.get('kernel-dev').map(record => record.bank), ['owner-kernel'])
+
+  const hostRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/owner-host/memories/recall').length
+  const kernelRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/owner-kernel/memories/recall').length
+  const hostDirectiveGets = () => state.requests.filter(request => request.method === 'GET' && request.path === '/v1/default/banks/owner-host/directives').length
+  const tick = () => new Promise(resolve => setTimeout(resolve, 25))
+
+  // Disjoint vocabularies per bank; standing directives on both; failure
+  // lessons on both (the gate surface's canaries).
+  await hostTool.execute({ action: 'retain', text: 'The amber coil winds the east bus.' }, { signal: baseSignal })
+  await presetTool.execute({ action: 'retain', text: 'The cobalt pin bridges the west rack.' }, { signal: baseSignal })
+  await hostTool.execute({ action: 'retain', kind: 'directive', name: 'host-rule', text: 'Host standing rule: keep the amber coil warm.' }, { signal: baseSignal })
+  await presetTool.execute({ action: 'retain', kind: 'directive', name: 'kernel-rule', text: 'Kernel standing rule: never open the west rack.' }, { signal: baseSignal })
+  await hostTool.execute({ action: 'retain', text: '[experience] Never flash the amber relay without guarding the east bus.' }, { signal: baseSignal })
+  await presetTool.execute({ action: 'retain', text: '[experience] Never flash the cobalt relay without a pull-up on the west rack.' }, { signal: baseSignal })
+
+  const kernel = { session: makeSession('sess-owner-kernel', { agentPreset: 'kernel-dev' }) }
+  const hostBase = hostRecalls()
+  const kernelBase = kernelRecalls()
+  const hostDirsBase = hostDirectiveGets()
+
+  // Turn 1, the owner mount: ONE snapshot, the owner bank's card, with
+  // BOTH banks' standing directives in their own per-bank sections.
+  const decision = await runStep(presetPreStep, kernel, 1, [userMsg('wire the amber coil and the cobalt pin')])
+  const card = decision.messages.find(message => message.source?.kind === 'hindsight')
+  assert.ok(card, 'the owner mount commits the session snapshot')
+  const cardText = card.content[0].text
+  assert.ok(cardText.includes('Hindsight bank "owner-kernel"'), 'the card names the owner bank')
+  assert.ok(cardText.includes('cobalt pin bridges'), 'the card carries the owner bank hit')
+  assert.ok(!cardText.includes('amber coil winds'), 'the shadow bank hits stay out of the owner card')
+  assert.ok(cardText.includes('Hindsight bank "owner-kernel" - follow them'), 'the owner bank rules section')
+  assert.ok(cardText.includes('Hindsight bank "owner-host" - follow them'), 'the merged shadow bank rules section')
+  assert.ok(cardText.includes('Kernel standing rule'), 'the owner bank rule text')
+  assert.ok(cardText.includes('Host standing rule'), 'the merged shadow bank rule text')
+  assert.equal(kernelRecalls(), kernelBase + 1, 'one owner recall for the turn start')
+  assert.equal(hostRecalls(), hostBase, 'the host mount made no recall for the kernel session')
+  assert.equal(hostDirectiveGets(), hostDirsBase + 1, 'the owner merged the host directives (the one extra GET)')
+  console.log('ok  mount seventeen: one snapshot per turn start, both banks rules merged')
+
+  // The host mount, driven for the same kernel session, is silent on
+  // every automatic surface: no second snapshot, no prefetch, no
+  // post-compaction recall, no gate lookup - and no bank call at all.
+  const silentDecision = await hostPreStep(
+    { agent: kernel, messages: [userMsg('steer: protect the amber coil')], turn: 2, step: 2, signal: baseSignal },
+    async () => ({ kind: 'enter', messages: [] }),
+  )
+  assert.equal(silentDecision.messages.length, 0, 'no host mid-step recall for the kernel session')
+  assert.equal(hostRecalls(), hostBase, 'the mid-step claim pays no host lookup')
+  hostTurnStopping({ agent: kernel, turn: 2, signal: baseSignal })
+  await tick()
+  assert.equal(hostRecalls(), hostBase, 'no host prefetch for the kernel session')
+  hostSessionEvent(kernel.session, { type: 'compaction/end', data: { compactionId: 'c-k1', turn: null } })
+  await tick()
+  assert.equal(hostRecalls(), hostBase, 'no host post-compaction recall for the kernel session')
+  const allowNext = async () => ({ kind: 'allow' })
+  const gateCall = (name, argumentsX, agentX) => ({ name, arguments: argumentsX, agent: agentX, signal: baseSignal })
+  const hostGateResult = await hostGate(gateCall('bash', { command: 'flash the amber relay' }, kernel), allowNext)
+  assert.deepEqual(hostGateResult, { kind: 'allow' }, 'the host gate is silent for the kernel session')
+  assert.equal(hostRecalls(), hostBase, 'no host gate lookup for the kernel session')
+  console.log('ok  mount seventeen: the host row is silent on every kernel surface')
+
+  // The owner's own surfaces are untouched: its prefetch runs for the
+  // kernel session (and merges the host directives into its cached
+  // result), and its gate DENIES from the owner bank's lessons.
+  presetTurnStopping({ agent: kernel, turn: 2, signal: baseSignal })
+  await tick()
+  assert.equal(kernelRecalls(), kernelBase + 2, 'the owner prefetch ran for the kernel session')
+  assert.equal(hostDirectiveGets(), hostDirsBase + 2, 'the prefetch merged the host directives too')
+  const consumed = await runStep(presetPreStep, kernel, 1, [userMsg('re-check the west rack pull-up')])
+  const consumedCard = consumed.messages.find(message => message.source?.kind === 'hindsight')
+  assert.ok(consumedCard, 'the cached prefetch lands on the turn (unchanged recall: the marker row)')
+  assert.ok(consumedCard.content[0].text.includes('no new memories this turn'), 'the marker names the unchanged recall')
+  assert.ok(consumedCard.content[0].text.includes('Standing rules from the bank unchanged'), 'the marker keeps the rules pointer')
+  const kernelGateResult = await presetGate(gateCall('bash', { command: 'flash the cobalt relay' }, kernel), allowNext)
+  assert.equal(kernelGateResult.kind, 'deny', 'the owner bank gate is active for the kernel session')
+  assert.ok(kernelGateResult.reason.includes('cobalt relay'), 'the denial carries the owner bank lesson')
+  console.log('ok  mount seventeen: the owner mount keeps its full behavior')
+
+  // The owner's post-compaction recall commits for the kernel session
+  // (directly to the surface, its own label); the host's stays silent.
+  presetSessionEvent(kernel.session, { type: 'compaction/end', data: { compactionId: 'c-k2', turn: null } })
+  await tick()
+  const compactSnapshots = snapshots(kernel.session).filter(snapshot =>
+    snapshot.data.source.sections[0].name.startsWith('recall:compact'),
+  )
+  assert.equal(compactSnapshots.length, 1, 'the owner commits the post-compaction snapshot')
+  assert.equal(compactSnapshots[0].data.source.bank, 'owner-kernel')
+  assert.equal(hostRecalls(), hostBase, 'the host mount still made zero recalls')
+  console.log('ok  mount seventeen: post-compaction recall is the owner alone')
+
+  // A session no preset mount covers: the host row serves it unchanged
+  // (host bank only - no kernel section, no kernel rules).
+  const plain = { session: makeSession('sess-owner-plain') }
+  const plainDecision = await runStep(hostPreStep, plain, 1, [userMsg('wind the amber coil tighter')])
+  const plainCard = plainDecision.messages.find(message => message.source?.kind === 'hindsight')
+  assert.ok(plainCard, 'the host row serves a no-preset session as before')
+  assert.ok(plainCard.content[0].text.includes('Hindsight bank "owner-host"'), 'the host card names the host bank')
+  assert.ok(!plainCard.content[0].text.includes('owner-kernel'), 'no kernel section on the host card')
+  assert.ok(!plainCard.content[0].text.includes('Kernel standing rule'), 'no kernel rules on the host card')
+  console.log('ok  mount seventeen: no-preset sessions keep the host row behavior')
+
+  // The preset generation dies: its record unregisters from the shared
+  // registry and the host row resumes serving the kernel session (full
+  // behavior, no merge - the kernel bank is registered nowhere).
+  for (const dispose of [...presetCtx.effectDisposers]) dispose()
+  assert.equal(registry.get('kernel-dev'), undefined, 'the dead generation unregisters its record')
+  const hostResumed = await runStep(hostPreStep, kernel, 1, [userMsg('stand up the amber coil again')])
+  const hostCard = hostResumed.messages.find(message => message.source?.kind === 'hindsight')
+  assert.ok(hostCard, 'the host row resumes serving the kernel session')
+  assert.ok(hostCard.content[0].text.includes('Host standing rule'), 'the host rules section on the resumed card')
+  assert.ok(!hostCard.content[0].text.includes('owner-kernel'), 'no kernel section after the generation died')
+  console.log('ok  mount seventeen: a dead preset generation ends its ownership')
+
+  // Failure isolation of the merge: a shadow bank whose directive
+  // listing fails is simply omitted - the owner card still lands with
+  // its own rules (the shadow's failure never discards the snapshot).
+  const failCtx = makeCtx()
+  plugin.apply(failCtx, {
+    ...standard.value,
+    baseUrl: stubUrl,
+    bank: 'no-dir',
+    recallContextTurns: 1,
+    prefetch: false,
+  })
+  const failScope = createScope(failCtx, { agentPreset: 'fail-preset' })
+  plugin.apply(failScope.ctx, {
+    ...standard.value,
+    baseUrl: stubUrl,
+    bank: 'fail-owner',
+    recallContextTurns: 1,
+    prefetch: false,
+  })
+  const failPreStep = failScope.ctx.listeners[0].fn
+  const failTool = failScope.ctx.tools.registered[1] // same inherited array: [0] is the no-dir host tool
+  await failTool.execute({ action: 'retain', text: 'The verdant lens focuses the south grid.' }, { signal: baseSignal })
+  await failTool.execute({ action: 'retain', kind: 'directive', name: 'fail-rule', text: 'Fail owner rule: focus the south lens.' }, { signal: baseSignal })
+  const failer = { session: makeSession('sess-fail', { agentPreset: 'fail-preset' }) }
+  const failDecision = await runStep(failPreStep, failer, 1, [userMsg('aim the verdant lens')])
+  const failCard = failDecision.messages.find(message => message.source?.kind === 'hindsight')
+  assert.ok(failCard, 'a failed shadow listing does not discard the owner snapshot')
+  assert.ok(failCard.content[0].text.includes('Hindsight bank "fail-owner" - follow them'), 'the owner rules section is intact')
+  assert.ok(!failCard.content[0].text.includes('no-dir'), 'the failing shadow bank contributes no section')
+  console.log('ok  mount seventeen: a failing shadow listing is merged away, the snapshot lands')
+}
 // ── degraded behavior: server unreachable, bounded, never blocks ────────────
 {
   const ctx = makeCtx()

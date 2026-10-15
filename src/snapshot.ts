@@ -21,6 +21,16 @@ import type { DirectiveRule, LessonHit, RecallHit } from './types.ts'
 /** Bound for the recall query drawn from the user message. */
 export const MAX_QUERY_CHARS = 1000
 
+/** One bank's standing directives as a rendered section of the snapshot:
+ *  the mount's own listing, or a shadowed mount's directives merged into
+ *  the owner's snapshot under their own bank's name. */
+export interface RuleSection {
+  /** The bank whose rules this section names (its header carries it). */
+  readonly bank: string
+  /** The bank's active standing directives, priority-ordered. */
+  readonly rules: DirectiveRule[]
+}
+
 /** Render hits as the model-facing memory text. A curatable hit (a world /
  *  experience fact) carries its id — the handle for memory curation. An
  *  observation hit carries NO id of its own: the bank refuses to curate
@@ -42,16 +52,20 @@ export function renderRecall(bank: string, hits: RecallHit[]): string {
   return lines.join('\n')
 }
 
-/** Render the automatic snapshot: the recalled memories, plus the bank's
- *  standing directives as their OWN section (priority-ordered). Rules reach
- *  the model in this section even when the recall matched nothing — that is
- *  what keeps a stored rule from decaying with recall relevance. */
-export function renderSnapshot(bank: string, hits: RecallHit[], rules: DirectiveRule[]): string {
+/** Render the automatic snapshot: the recalled memories, plus the standing
+ *  directives of each bank in its OWN section (priority-ordered per bank).
+ *  A dual-mounted session renders one section per contributing bank - the
+ *  mount's own bank first, then the shadowed mounts' merged directives -
+ *  so every bank's rules keep reaching the model even when the recall
+ *  matched nothing (that is what keeps a stored rule from decaying with
+ *  recall relevance). */
+export function renderSnapshot(bank: string, hits: RecallHit[], sections: RuleSection[]): string {
   const parts: string[] = []
   if (hits.length > 0) parts.push(renderRecall(bank, hits))
-  if (rules.length > 0) {
-    const lines = [`Standing rules from the Hindsight bank "${bank}" — follow them every turn:`]
-    for (const rule of rules) {
+  for (const section of sections) {
+    if (section.rules.length === 0) continue
+    const lines = [`Standing rules from the Hindsight bank "${section.bank}" - follow them every turn:`]
+    for (const rule of section.rules) {
       lines.push(`- ${rule.content.trim()}`)
     }
     parts.push(lines.join('\n'))
@@ -77,13 +91,15 @@ function hitHeadline(text: string): string {
  *  what it applied (one compact line per recalled memory, plus a pointer
  *  for the standing rules), so the UI shows which memories were applied on
  *  this turn without duplicating the block in the model context. */
-export function renderUnchanged(bank: string, hits: RecallHit[], rules: DirectiveRule[]): string {
+export function renderUnchanged(bank: string, hits: RecallHit[], sections: RuleSection[]): string {
   const lines = [`Hindsight bank "${bank}": no new memories this turn — the snapshot shown earlier in this conversation is still in effect:`]
   for (const hit of hits) {
     const headline = hitHeadline(hit.text)
     if (headline.length > 0) lines.push(`- ${headline}`)
   }
-  if (rules.length > 0) lines.push(`Standing rules from the bank unchanged — still in effect.`)
+  if (sections.some(section => section.rules.length > 0)) {
+    lines.push(`Standing rules from the bank unchanged — still in effect.`)
+  }
   return lines.join('\n')
 }
 
@@ -535,20 +551,37 @@ function snapshotText(message: UserMessage): string {
   return block?.type === 'text' ? block.text : ''
 }
 
+/** The bank a rendered snapshot names on its first line: both renderings
+ *  start with the `Hindsight bank "..."` header, so a card committed
+ *  BEFORE the message source recorded `bank` still carries its
+ *  attribution in the rendered text. `undefined` when the bank cannot
+ *  be recovered (such a card is then never a retirement target — a
+ *  wrong-bank retirement is worse than a stale card). */
+function snapshotBankFromText(text: string): string | undefined {
+  const line = text.split('\n', 1)[0]
+  const match = line.match(/Hindsight bank "([^"]+)"/)
+  return match === null ? undefined : match[1]
+}
+
 /**
  * `session`'s hindsight snapshot messages still on
  * the model-visible surface (not shadowed by compaction), newest first.
- * Scans the durable log from the end. The caller compares the rendered
- * recall against EVERY one of them — not just the newest — because a
- * snapshot two turns back is still on the surface, and re-committing it
- * would be churn too (the unchanged-recall marker row is a hindsight
- * snapshot message as well, but its text never equals a rendered recall,
- * so it can never trigger the comparison).
+ * Scans the durable log from the end. Every entry carries its `bank` —
+ * the mount attribution the commit recorded on the message source, or
+ * the bank the rendered text names when the card predates that field —
+ * so a caller on one mount can scope its comparisons to its own bank's
+ * cards (a second mount on the same session, a different bank, owns its
+ * own cards). The caller compares the rendered recall against EVERY
+ * retained card of its bank — not just the newest — because a snapshot
+ * two turns back is still on the surface, and re-committing it would be
+ * churn too (the unchanged-recall marker row is a hindsight snapshot
+ * message as well, but its text never equals a rendered recall, so it
+ * can never trigger the comparison).
  */
-export function findRetainedSnapshots(session: Session): { seq: SessionSeq; text: string; message: UserMessage }[] {
+export function findRetainedSnapshots(session: Session): { seq: SessionSeq; text: string; message: UserMessage; bank: string | undefined }[] {
   const onSurface = new Set(session.surface.nodes)
   const events = session.snapshotEvents()
-  const retained: { seq: SessionSeq; text: string; message: UserMessage }[] = []
+  const retained: { seq: SessionSeq; text: string; message: UserMessage; bank: string | undefined }[] = []
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event === undefined || event.type !== 'user/message') continue
@@ -560,7 +593,10 @@ export function findRetainedSnapshots(session: Session): { seq: SessionSeq; text
     // rendered recall, so it could not match either — the form check just
     // keeps the set honest).
     if (source.kind !== 'hindsight' || source.form !== 'snapshot') continue
-    if (onSurface.has(event.seq)) retained.push({ seq: event.seq, text: snapshotText(event.data), message: event.data })
+    if (onSurface.has(event.seq)) {
+      const text = snapshotText(event.data)
+      retained.push({ seq: event.seq, text, message: event.data, bank: source.bank ?? snapshotBankFromText(text) })
+    }
   }
   return retained
 }

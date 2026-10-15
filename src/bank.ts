@@ -297,24 +297,30 @@ export function createMount(
 
     async listDirectives(signal, session): Promise<DirectiveRule[]> {
       await syncBankConfig(signal)
-      let path = `${bankPath}/directives?active_only=true`
-      // The same tier filter as recall: the server includes every untagged
-      // (global) directive in every mode, so the two tier tags select exactly
-      // the session's own tier, its preset tier, and the global ones.
-      if (session !== undefined) {
-        const tags = recallTags(session).map(encodeURIComponent).join(',')
-        path += `&tags=${tags}&tags_match=any`
-      }
-      const data = await call(path, {}, signal, 'GET')
+      // The tier filter runs here, not on the server: the directives
+      // endpoint's `tags` query parameter takes ONE literal tag, not
+      // recall's two-tag tier list (the comma-joined pair is matched as a
+      // single literal tag and selects nothing), so the listing is fetched
+      // unfiltered - every active directive - and reduced to what recall
+      // sees: untagged (global) directives in every mode, plus tagged ones
+      // carrying the session's own tier tag or its preset's.
+      const data = await call(`${bankPath}/directives?active_only=true`, {}, signal, 'GET')
       const items = data.items
       if (!Array.isArray(items)) return []
+      const tierTags = session === undefined ? null : recallTags(session)
+      const inTier = (tags: unknown): boolean => {
+        if (tierTags === null) return true
+        if (!Array.isArray(tags) || tags.length === 0) return true
+        return tags.some(tag => typeof tag === 'string' && tierTags.includes(tag))
+      }
       return items
         .filter((rule): rule is DirectiveRule =>
           typeof rule === 'object' && rule !== null
           && typeof (rule as DirectiveRule).id === 'string'
           && typeof (rule as DirectiveRule).name === 'string'
           && typeof (rule as DirectiveRule).content === 'string'
-          && typeof (rule as DirectiveRule).priority === 'number',
+          && typeof (rule as DirectiveRule).priority === 'number'
+          && inTier((rule as { tags?: unknown }).tags),
         )
         .sort((a, b) => b.priority - a.priority)
     },
