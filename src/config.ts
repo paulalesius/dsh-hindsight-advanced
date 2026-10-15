@@ -106,7 +106,7 @@ export interface ResolvedConfig {
    *  the pre-step decision points (turn boundary, mid-step under
    *  pressure, request retry), so there is no decision to ride. The
    *  lookup is detached (the event is fire-and-forget) and bounded by
-   *  `autoContextTimeoutMs`; a timeout or failure discards the snapshot
+   *  `recallCompactTimeoutMs`; a timeout or failure discards the snapshot
    *  silently. An identical recall commits nothing (the unchanged-marker
    *  row under the `recallPreserve: true` default), and under
    *  `recallPreserve: false` a refresh retires the previous full card in
@@ -131,6 +131,17 @@ export interface ResolvedConfig {
   maxRecallTokens: number
   /** Bound, in milliseconds, for the automatic recall lookup. */
   autoContextTimeoutMs: number
+  /** Bound, in milliseconds, for the POST-COMPACTION automatic recall
+   *  lookup (`recallAfterCompaction`). The post-compaction query is the
+   *  full multi-turn composition (the anchor under a `Prior context:`
+   *  block, capped at 1000 chars), which the bank serves slower than the
+   *  single-message queries of the loop-blocking paths - so the detached
+   *  lookup rides its own bound instead of sharing
+   *  `autoContextTimeoutMs` (under the shared bound it times out
+   *  deterministically and the snapshot is silently discarded). The path
+   *  is fire-and-forget, so the larger default never reaches the agent
+   *  loop. */
+  recallCompactTimeoutMs: number
   /** The visibility tier `retain` uses when the model omits the `scope`
    *  parameter (see the tier model in `tiers.ts`). */
   retainScope: MemoryScope
@@ -143,6 +154,11 @@ export interface ResolvedConfig {
 const DEFAULT_BASE_URL = 'http://127.0.0.1:8888'
 const DEFAULT_MAX_RECALL_TOKENS = 4096
 const DEFAULT_AUTO_CONTEXT_TIMEOUT_MS = 2500
+/** The default bound for the detached post-compaction recall lookup
+ *  (the query is the full multi-turn composition, which the bank serves
+ *  slower than the loop-blocking paths' single-message queries; the path
+ *  never blocks the agent loop, so the bound stays larger). */
+const DEFAULT_RECALL_COMPACT_TIMEOUT_MS = 8000
 /** How many recent turns the automatic recall composes into its query
  *  (the reference Hindsight integrations' default is 1; the plugin's is 5
  *  — the `Prior context:` block is the query's first-class part). */
@@ -353,6 +369,7 @@ export const Config: {
         retainAsync: boolFlag(record, 'retainAsync', false, issues),
         maxRecallTokens: intFlag(record, 'maxRecallTokens', DEFAULT_MAX_RECALL_TOKENS, issues),
         autoContextTimeoutMs: intFlag(record, 'autoContextTimeoutMs', DEFAULT_AUTO_CONTEXT_TIMEOUT_MS, issues),
+        recallCompactTimeoutMs: intFlag(record, 'recallCompactTimeoutMs', DEFAULT_RECALL_COMPACT_TIMEOUT_MS, issues),
         retainScope,
       }
       return issues.length > 0 ? { issues } : { value }

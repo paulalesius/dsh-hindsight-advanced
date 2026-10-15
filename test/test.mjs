@@ -48,7 +48,10 @@
 // skipped, an unchanged recall commits the marker row (or nothing under
 // recallPreserve: false), and the recallPreserve: false direct commit
 // retires the previous full card in place (tombstone + adjacent shadow
-// price, fresh card appended),
+// price, fresh card appended), and the lookup rides its own
+// recallCompactTimeoutMs bound (a delay outliving the shared
+// autoContextTimeoutMs still commits the snapshot, while the same
+// delay on the synchronous path times out),
 // plus the pre-execution lesson gate (lessonGate, default off): a pending
 // call to a tool named in lessonGateTools anchors a bounded experience-only
 // recall on the call itself; a hit at or above lessonGateMinScore DENIES
@@ -90,6 +93,7 @@ assert.deepEqual(standard.value, {
   retainAsync: false,
   maxRecallTokens: 4096,
   autoContextTimeoutMs: 2500,
+  recallCompactTimeoutMs: 8000,
   actionLessons: false,
   actionLessonCandidates: 10,
   lessonGate: false,
@@ -159,6 +163,14 @@ assert.ok('value' in postCompact, JSON.stringify(postCompact))
 assert.equal(postCompact.value.recallAfterCompaction, true)
 const badPostCompact = validate({ bank: 'x', recallAfterCompaction: 'yes' })
 assert.ok('issues' in badPostCompact && badPostCompact.issues.some(issue => issue.path?.[0] === 'recallAfterCompaction'), JSON.stringify(badPostCompact))
+
+// recallCompactTimeoutMs: 8000 by default (the detached post-compaction
+// lookup's own bound); opt-in + validation
+const compactTuned = validate({ bank: 'x', recallCompactTimeoutMs: 12000 })
+assert.ok('value' in compactTuned, JSON.stringify(compactTuned))
+assert.equal(compactTuned.value.recallCompactTimeoutMs, 12000)
+const badCompactTimeout = validate({ bank: 'x', recallCompactTimeoutMs: 'soon' })
+assert.ok('issues' in badCompactTimeout && badCompactTimeout.issues.some(issue => issue.path?.[0] === 'recallCompactTimeoutMs'), JSON.stringify(badCompactTimeout))
 
 // lessonGate / lessonGateMinScore / lessonGateTools: off by default
 // (the pre-execution gate is opt-in); opt-in + validation
@@ -1809,6 +1821,42 @@ const toolCallBlock = (name) => ({ id: `tc-${name}`, type: 'toolCall', name, inp
   assert.equal(snapshots(otto.session).length, 2, 'an identical refresh commits nothing (no churn)')
   assert.equal(keepRecalls().length, 3, 'the lookup still ran on the identical refresh (turn recall, refresh, identical)')
   console.log('ok  mount N: recallPreserve: false retires the previous full card in place on the direct commit (tombstone + shadow price)')
+
+  // N-budget: the post-compaction lookup rides its OWN bound
+  // (recallCompactTimeoutMs), decoupled from autoContextTimeoutMs: a
+  // delay that outlives the shared bound still commits the
+  // recall:compact snapshot, while the same delay on the loop-blocking
+  // synchronous path times out (the turn proceeds without memory).
+  const ctxBudget = makeCtx()
+  plugin.apply(ctxBudget, {
+    ...standard.value,
+    baseUrl: stubUrl,
+    bank: 'compact-budget',
+    prefetch: false,
+    recallAfterCompaction: true,
+    autoContextTimeoutMs: 50,
+    recallCompactTimeoutMs: 5000,
+  })
+  const budgetPreStep = ctxBudget.listeners[0].fn
+  const budgetEvents = ctxBudget.listeners[2].fn
+  const budgetTool = ctxBudget.tools.registered[0]
+  const ninaB = { session: makeSession('sess-n9') }
+  const budgetRecalls = () => state.requests.filter(request => request.path === '/v1/default/banks/compact-budget/memories/recall')
+  await budgetTool.execute({ action: 'retain', text: 'The deploy target is the staging cluster.' }, { signal: baseSignal })
+
+  state.recallDelayMs = 200
+  await runStep(budgetPreStep, ninaB, 1, [userMsg('where do we deploy')])
+  await sleep(50)
+  assert.equal(budgetRecalls().length, 1, 'the turn issued its recall')
+  assert.equal(snapshots(ninaB.session).length, 0, 'the 200ms delay outlives the 50ms shared bound: the synchronous turn recall times out, no snapshot')
+
+  asstStep(ninaB.session, 1, 1, [textBlock('Staging: the deploy target is the staging cluster.')])
+  fireCompaction(budgetEvents, ninaB.session, { compactionId: 'c-n9', turn: null })
+  assert.ok(await waitFor(() => budgetRecalls().length === 2, 2000), 'the compaction issued its recall')
+  assert.ok(await waitFor(() => snapshots(ninaB.session).length === 1, 2000), 'the post-compaction lookup outlives the shared bound: its own budget admits it')
+  assert.match(snapshots(ninaB.session)[0].data.source.sections[0].name, /^recall:compact - \d+ms$/, 'the row is labeled recall:compact')
+  state.recallDelayMs = 0
+  console.log('ok  mount N: the post-compaction lookup rides recallCompactTimeoutMs (decoupled from autoContextTimeoutMs)')
 }
 
 // ── mount O: the pre-execution lesson gate (lessonGate, default off) ───────

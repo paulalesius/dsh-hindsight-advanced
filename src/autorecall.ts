@@ -45,9 +45,9 @@
  * nothing (or the unchanged-marker row under the preserve default), and
  * under `recallPreserve: false` a refresh retires the previous full card
  * in place. The event is fire-and-forget: the handler returns immediately
- * and the bounded lookup runs detached (discarded silently on timeout,
- * abort, or failure); subagent sessions are skipped like every other
- * automatic recall.
+ * and the bounded lookup runs detached on its own `recallCompactTimeoutMs`
+ * bound (a timeout, abort, or failure discards it silently); subagent
+ * sessions are skipped like every other automatic recall.
  *
  * Assembly runs BEFORE the pre-step waterfall, so the memory cannot ride
  * the system prompt for its own turn; the snapshot instead rides the
@@ -59,8 +59,10 @@
  * clock) that the collapsed context row displays in place of the plugin
  * name; the `hindsight` kind stays the attribution identity.
  *
- * The lookup is bounded: a stopped or slow server costs at most
- * `autoContextTimeoutMs` and the turn proceeds without memory. To keep a
+ * The loop-blocking lookups are bounded: a stopped or slow server costs at
+ * most `autoContextTimeoutMs` and the turn proceeds without memory (the
+ * detached post-compaction lookup rides its own `recallCompactTimeoutMs`).
+ * To keep a
  * slow bank off the critical path, the work is started AHEAD of the turn
  * that pays for it: when a turn stops (no live tool calls, no fresh
  * steering) a detached job runs the same recall + directive listing for
@@ -562,15 +564,24 @@ export function buildAutoRecall(
    * timeout, abort, or failure means the step proceeds without memory:
    * `null`, and the base decision passes through untouched). Both lookups
    * ride ONE bounded budget: the shared controller aborts the whole pair
-   * at `autoContextTimeoutMs` (sequential: the directives list is cheap,
-   * and the shared timeout still bounds the total), and the step's signal
-   * aborts the pair early when the turn dies mid-lookup.
+   * at `timeoutMs` (default `autoContextTimeoutMs`; the detached
+   * post-compaction path passes `recallCompactTimeoutMs` - its multi-turn
+   * query is served slower than the loop-blocking paths' single-message
+   * queries, so the shared bound would time it out deterministically;
+   * sequential: the directives list is cheap, and the bound still covers
+   * the total), and the step's signal aborts the pair early when the turn
+   * dies mid-lookup.
    */
-  function syncRecall(session: Session, query: string, signal: AbortSignal): Promise<PrefetchedTurn | null> {
+  function syncRecall(
+    session: Session,
+    query: string,
+    signal: AbortSignal,
+    timeoutMs = config.autoContextTimeoutMs,
+  ): Promise<PrefetchedTurn | null> {
     return (async (): Promise<PrefetchedTurn | null> => {
       const startedAt = Date.now()
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), config.autoContextTimeoutMs)
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
       const onAbort = (): void => controller.abort()
       if (!signal.aborted) signal.addEventListener('abort', onAbort, { once: true })
       try {
@@ -784,7 +795,7 @@ export function buildAutoRecall(
    * decision points, so there is no decision to ride). The event is
    * fire-and-forget: the handler returns immediately and the bounded
    * lookup runs detached (its own controller, bounded by
-   * `autoContextTimeoutMs`; a timeout or failure discards the snapshot
+   * `recallCompactTimeoutMs`; a timeout or failure discards the snapshot
    * silently). Subagent sessions are skipped like every other automatic
    * recall.
    */
@@ -795,7 +806,7 @@ export function buildAutoRecall(
     if (session.header?.origin === 'subagent') return
     const latest = queryFromSession(session)
     const query = composeRecallQuery(session, latest, config.recallContextTurns, true)
-    void syncRecall(session, query, new AbortController().signal).then(result => {
+    void syncRecall(session, query, new AbortController().signal, config.recallCompactTimeoutMs).then(result => {
       if (result === null) return
       commitSnapshotDirect(session, result.hits, result.rules, result.durationMs)
     }, () => {

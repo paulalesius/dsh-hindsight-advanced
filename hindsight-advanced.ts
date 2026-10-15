@@ -192,7 +192,7 @@
  *   default), and under `recallPreserve: false` a refresh retires the
  *   previous full card in place like any other snapshot. The lookup is
  *   detached (the event is fire-and-forget) and bounded by
- *   `autoContextTimeoutMs`; a timeout or failure discards the snapshot
+ *   `recallCompactTimeoutMs`; a timeout or failure discards the snapshot
  *   silently. Subagent sessions are skipped.
  * - `actionLessons`: default `false`. The failure-lesson pass for a
  *   LATER step of a running turn whose claim carries no human message:
@@ -252,6 +252,15 @@
  *   extraction in the background.
  * - `maxRecallTokens` — recall response budget; default `4096`.
  * - `autoContextTimeoutMs` — bound for the automatic lookup; default `2500`.
+ * - `recallCompactTimeoutMs`: bound for the DETACHED post-compaction
+ *   lookup (`recallAfterCompaction`); default `8000`. The post-compaction
+ *   query is the full multi-turn composition (the anchor under a `Prior
+ *   context:` block, up to 1000 chars), which the bank serves slower than
+ *   the single-message queries of the loop-blocking paths - so the
+ *   detached lookup rides its own bound instead of sharing
+ *   `autoContextTimeoutMs` (under the shared bound it would time out
+ *   deterministically and discard the snapshot). The event is
+ *   fire-and-forget, so the larger bound never reaches the agent loop.
  * - `retainScope` — the visibility tier `retain` uses when the model omits
  *   the `scope` parameter: `global` | `preset` | `session`; default
  *   `preset`. Recall and reflect always see all three tiers the session

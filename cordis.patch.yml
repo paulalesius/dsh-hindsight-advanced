@@ -93,7 +93,9 @@
         # under pressure, request retry), so there is no step to hang
         # the recall on. A failed compaction (an error) recalls nothing;
         # subagent sessions stay silent; the lookup is detached and
-        # bounded by autoContextTimeoutMs.
+        # bounded by recallCompactTimeoutMs (its own bound - the composed
+        # query is served slower than the single-message lookups, and the
+        # shared autoContextTimeoutMs would time it out deterministically).
         # recallAfterCompaction: false
 
         # false - off. true - the pre-execution lesson gate: before a
@@ -141,6 +143,14 @@
         # 2500 — bound for the automatic lookup; a stopped/slow server never
         # blocks a turn.
         autoContextTimeoutMs: 2500
+
+        # 8000 - bound for the DETACHED post-compaction lookup
+        # (recallAfterCompaction). Its query is the full multi-turn
+        # composition (anchor + `Prior context:` block), which the bank
+        # serves slower than the single-message lookups, so it rides its
+        # own bound; the event is fire-and-forget, so it never blocks a
+        # turn.
+        # recallCompactTimeoutMs: 8000
 
         # The visibility tier `retain` uses when the model omits the `scope`
         # parameter: 'global' (visible to every session of the bank),

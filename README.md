@@ -86,10 +86,11 @@ Two things to know about the row:
 | `lessonGate` | `false` | `true`: before a call to a tool named in `lessonGateTools` is executed, the PENDING call itself anchors a bounded recall on the bank's failure lessons (its `experience` memories), and a hit whose match score is at or above `lessonGateMinScore` DENIES the call before the tool body runs: the model sees the rendered lessons as the tool's error result and learns from the recall before the action acts. Subagent sessions stay silent; only the named tools pay the lookup; a timeout or bank failure allows the call (no bank, no gate). Off by default. |
 | `lessonGateMinScore` | `0.3` | The minimum match score at which the gate denies a gated call (a hit under the threshold, or a hit without any score, allows the call). |
 | `lessonGateTools` | `bash`, `run_code` | The tool names the gate covers - only these calls pay the pre-execution lookup (the default is the side-effect-capable executors). |
-| `recallAfterCompaction` | `false` | `true`: right after a *successful* context compaction, the plugin recalls the bank on the conversation's last human message (the same `Prior context:` composition as the prefetch) and lands the snapshot directly on the surface - the row is labeled `recall:compact - <ms>ms`. A compaction fires outside any step (at a turn boundary, mid-step under context pressure, or on a request retry), so there is no step to hang the recall on; the lookup is detached and bounded by `autoContextTimeoutMs`, and a *failed* compaction recalls nothing. Off by default. |
+| `recallAfterCompaction` | `false` | `true`: right after a *successful* context compaction, the plugin recalls the bank on the conversation's last human message (the same `Prior context:` composition as the prefetch) and lands the snapshot directly on the surface - the row is labeled `recall:compact - <ms>ms`. A compaction fires outside any step (at a turn boundary, mid-step under context pressure, or on a request retry), so there is no step to hang the recall on; the lookup is detached and bounded by `recallCompactTimeoutMs`, and a *failed* compaction recalls nothing. Off by default. |
 | `retainScope` | `preset` | Where a stored memory lands when the agent doesn't say: `global` (everything in the bank), `preset` (this agent preset), or `session` (this session only). |
 | `maxRecallTokens` | `4096` | How much memory to bring back per recall. |
 | `autoContextTimeoutMs` | `2500` | How long a turn may wait on the memory server before moving on without it. Because the lookup runs ahead (below), most turns never pay this; a slow or stopped server never blocks the agent. |
+| `recallCompactTimeoutMs` | `8000` | The bound for the DETACHED post-compaction lookup (`recallAfterCompaction`). Its query is the full multi-turn composition (anchor + `Prior context:` block, up to 1000 chars), which the bank serves slower than the single-message lookups of the loop-blocking paths - under the shared `autoContextTimeoutMs` it would time out deterministically and the snapshot would be silently discarded. The event is fire-and-forget, so the larger default never reaches the agent loop. |
 | `retainAsync` | `false` | `false` (the default): storing waits until the bank has processed the memory, so the next turn already sees it. `true`: store acknowledges fast and the bank processes it in the background. |
 | `bankConfig` | — | Optional instructions for the *server's* own memory extraction — for example `retain_mission: "Focus on decisions and durable project facts."` tells the Hindsight server what to pull out of what the agent stores. |
 
@@ -143,7 +144,12 @@ pressure compaction mid-step, or a retry after a request overflow), so
 there is no pre-step decision to hang the snapshot on - the lookup runs
 detached on the conversation's last human message (the same
 `Prior context:` composition as the prefetch) and the snapshot lands
-directly on the surface, labeled `recall:compact - <ms>ms`. A failed
+directly on the surface, labeled `recall:compact - <ms>ms`. The lookup
+rides its own bound (`recallCompactTimeoutMs`, default `8000`) because
+the composed query is served slower than the single-message lookups of
+the loop-blocking paths - under the shared `autoContextTimeoutMs` it
+would time out deterministically; the event is fire-and-forget, so the
+bound never reaches the agent loop. A failed
 compaction (the server reports the error) recalls nothing, subagent
 sessions stay silent, and an unchanged recall commits nothing - or the
 "no new memories" marker row, as everywhere else.
